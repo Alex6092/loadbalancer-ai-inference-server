@@ -1,14 +1,16 @@
 # Installation Linux
 
+Pour la VM `172.29.254.21` et le runner GitHub, suivre **[le guide CI/CD](CICD.md)**. Les instructions manuelles ci-dessous sont une alternative, sans runner. Les unités fournies utilisent désormais `/opt/providence-ai/current`.
+
 ## Préparer la machine
 
-Installer Node.js **24 LTS** et npm, puis copier le projet dans `/opt/providence-ai`. Les commandes ci-dessous sont à exécuter par l’administrateur du serveur et à adapter à votre distribution.
+Installer Node.js **24 LTS** et npm, puis copier le projet dans `/opt/providence-ai/current`. Les commandes ci-dessous sont à exécuter par l’administrateur du serveur et à adapter à votre distribution.
 
 ```sh
 sudo useradd --system --home-dir /var/lib/providence-ai --create-home --shell /usr/sbin/nologin providence-ai
 sudo install -d -m 0750 -o root -g providence-ai /etc/providence-ai
 sudo install -d -m 0700 -o providence-ai -g providence-ai /var/lib/providence-ai
-cd /opt/providence-ai
+cd /opt/providence-ai/current
 npm ci --omit=dev
 npm run init
 sudo install -m 0640 -o root -g providence-ai .env /etc/providence-ai/service.env
@@ -29,7 +31,7 @@ Conserver l’`ENCRYPTION_KEY` générée. Ne pas déployer un `.env` de dévelo
 Créer le premier compte avec l’identité système du service :
 
 ```sh
-sudo -u providence-ai /usr/bin/node --env-file=/etc/providence-ai/service.env scripts/create-admin.js administrateur
+sudo -u providence-ai /usr/bin/env node --env-file=/etc/providence-ai/service.env scripts/create-admin.js administrateur
 sudo install -m 0644 deploy/providence-ai.service /etc/systemd/system/
 sudo install -m 0644 deploy/providence-ai-backup.service deploy/providence-ai-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -52,7 +54,7 @@ Les migrations sont ascendantes. Un retour à une ancienne version nécessitant 
 ## Sauvegarder
 
 ```sh
-sudo -u providence-ai /usr/bin/node --env-file=/etc/providence-ai/service.env scripts/backup.js
+sudo -u providence-ai /usr/bin/env node --env-file=/etc/providence-ai/service.env scripts/backup.js
 ```
 
 Les sauvegardes cohérentes sont créées dans `/var/lib/providence-ai/backups/`. Copier ces fichiers vers un stockage de sauvegarde contrôlé, et conserver le fichier d’environnement chiffré séparément. Le minuteur ne supprime aucune sauvegarde : configurer une rétention explicite, par exemple sept sauvegardes quotidiennes, selon les données d’élèves et la politique de l’établissement.

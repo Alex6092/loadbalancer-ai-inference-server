@@ -7,9 +7,11 @@ Wants=network-online.target
 Type=simple
 User=providence-ai
 Group=providence-ai
-WorkingDirectory=/opt/providence-ai
+WorkingDirectory=/opt/providence-ai/current
 EnvironmentFile=/etc/providence-ai/service.env
-ExecStart=/usr/bin/node /opt/providence-ai/src/index.js
+EnvironmentFile=-/etc/providence-ai/release.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node /opt/providence-ai/current/src/index.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

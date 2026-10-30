@@ -1,0 +1,66 @@
+name: Validation et déploiement
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Tests (Node.js 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Vérifier le contrat d’API généré
+        run: |
+          npm run api:generate
+          git diff --exit-code -- docs/openapi.json
+      - name: Vérifier les scripts Linux
+        run: |
+          for script in deploy/*.sh; do
+            bash -n "$script"
+          done
+
+  deploy:
+    name: Déploiement Debian
+    needs: validate
+    if: >-
+      github.repository == 'Alex6092/loadbalancer-ai-inference-server' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64, providence-ai-production]
+    environment:
+      name: production
+      url: http://172.29.254.21
+    concurrency:
+      group: providence-ai-production
+      cancel-in-progress: false
+    timeout-minutes: 20
+    steps:
+      # Aucun checkout ni script de PR exécuté sur la VM. La commande root
+      # installée par l’administrateur récupère elle-même le commit de main.
+      - name: Déployer le commit validé
+        env:
+          REVISION: ${{ github.sha }}
+        run: sudo --non-interactive /usr/local/sbin/providence-ai-deploy "$REVISION"
+      - name: Vérifier le reverse proxy
+        run: curl --fail --silent --show-error http://172.29.254.21/health/ready
+      - name: Résumé
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          printf 'Application : http://172.29.254.21/admin/\n\nCommit validé : `%s`\n' "$REVISION" >> "$GITHUB_STEP_SUMMARY"

@@ -24,6 +24,7 @@ export function configuration(overrides = {}) {
     tickMs: 250,
     bodyLimit: 16 * 1024 * 1024,
     logger: true,
+    release: process.env.RELEASE_SHA || 'development',
     ...overrides,
   };
   if (!config.encryptionKey || Buffer.from(config.encryptionKey, 'base64').length !== 32) {

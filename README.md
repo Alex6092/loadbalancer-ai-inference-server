@@ -68,6 +68,8 @@ Un arrêt propre conserve pour reprise les jobs asynchrones réessayables et ann
 
 ## Installation Linux et sauvegarde
 
+Le déploiement automatique par GitHub Actions sur la VM Debian est décrit dans [le guide CI/CD](docs/CICD.md). Les tests des pull requests utilisent GitHub ; seuls les déploiements de `main` utilisent le runner autohébergé.
+
 Voir [le guide d’exploitation](docs/OPERATIONS.md), l’unité [systemd](deploy/providence-ai.service) et la configuration [Nginx](deploy/nginx.conf).
 
 ```sh

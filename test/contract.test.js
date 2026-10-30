@@ -28,6 +28,16 @@ test('OpenAPI 3.1 valide ; réponses HTTP conformes aux schémas de jobs et d’
   assert.ok(validateJob(cancelled.json()), JSON.stringify(validateJob.errors));
 });
 
+test('Les sondes de santé exposent le SHA configuré pour vérifier un déploiement', async (t) => {
+  const release = '0123456789abcdef0123456789abcdef01234567';
+  const f = await fixture(t, { release });
+  for (const endpoint of ['/health/live', '/health/ready']) {
+    const response = await f.app.inject(endpoint);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { status: 'ok', release });
+  }
+});
+
 test('Administration : configuration complète, modèle vision, budgets et pagination', async (t) => {
   const f = await fixture(t);
   const headers = await adminLogin(f);

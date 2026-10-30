@@ -76,10 +76,10 @@ export async function createServer(overrides = {}) {
       .code(status)
       .send({ error: { code, message, ...(error.details ? { details: error.details } : {}) } });
   });
-  app.get('/health/live', async () => ({ status: 'ok' }));
+  app.get('/health/live', async () => ({ status: 'ok', release: config.release }));
   app.get('/health/ready', async () => {
     db.prepare('SELECT 1').get();
-    return { status: 'ok' };
+    return { status: 'ok', release: config.release };
   });
   app.get('/', async (request, reply) => reply.redirect('/admin/'));
   app.get('/openapi.json', async (request, reply) => reply.sendFile('openapi.json', path.join(root, 'docs')));
