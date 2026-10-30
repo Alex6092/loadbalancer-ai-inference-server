@@ -78,6 +78,8 @@ const migrations = [
   CREATE TABLE sessions (digest TEXT PRIMARY KEY, admin_id TEXT NOT NULL REFERENCES admins(id), csrf TEXT NOT NULL, expires_at INTEGER NOT NULL);
   CREATE TABLE audit (id INTEGER PRIMARY KEY, admin_id TEXT, action TEXT NOT NULL, target TEXT, created_at INTEGER NOT NULL);
   CREATE TABLE scheduler_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+  // Workers known to stop generating when the HTTP connection closes (vLLM, llama.cpp, LM Studio).
+  `ALTER TABLE workers ADD COLUMN stops_on_disconnect INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export function openDatabase(filename) {

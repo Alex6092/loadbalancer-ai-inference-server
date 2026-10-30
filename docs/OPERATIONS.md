@@ -65,13 +65,13 @@ Les sauvegardes cohérentes sont créées dans `/var/lib/providence-ai/backups/`
 2. Préserver l’ensemble actuel : `service.sqlite`, `service.sqlite-wal` et `service.sqlite-shm` s’ils existent, dans un répertoire de récupération.
 3. Installer la sauvegarde choisie à l’emplacement `DATABASE_PATH`, sans anciens fichiers WAL/SHM à cet emplacement. Rétablir propriétaire `providence-ai` et permissions `0600`.
 4. Restaurer l’`ENCRYPTION_KEY` correspondant à la sauvegarde.
-5. Redémarrer, vérifier les données et traiter les tentatives incertaines après vérification des workers.
+5. Redémarrer, vérifier les données et traiter les tentatives incertaines après vérification des workers. Un redémarrage rend incertaines les tentatives actives, même sur un worker à arrêt fiable.
 
 Une restauration peut réémettre des callbacks déjà livrés après la date de sauvegarde. Les destinataires doivent conserver leurs identifiants d’événements dédupliqués. Elle peut également rejouer des jobs dont la fin n’est pas dans la sauvegarde : réconcilier les applications avant de rouvrir les envois si nécessaire.
 
 ## Surveillance
 
-- File en attente et ancienneté des jobs, capacité occupée et tentatives incertaines.
+- File en attente et ancienneté des jobs, capacité occupée et tentatives incertaines. Sur un worker non déclaré à arrêt fiable, chaque annulation pendant une génération (bouton « Arrêter » d’un chat, onglet fermé) crée une tentative incertaine : des confirmations répétées indiquent qu’il faut vérifier ce serveur puis cocher **Arrêt fiable à la fermeture de la connexion**.
 - Erreurs workers, erreurs de livraison des callbacks et épuisement de quotas.
 - Espace disque, croissance de la base et de ses sauvegardes, disponibilité du service systemd.
 - Test régulier d’une restauration sur une machine isolée.

@@ -195,7 +195,7 @@ function render() {
         'Modèles disponibles et capacité de chaque serveur.',
         button('new-model', '', '+ Modèle') + button('new-worker', '', '+ Worker', 'primary'),
       ) +
-      `<div class="worker-grid">${snapshot.workers.map((w) => `<article class="worker"><h3>${esc(w.name)} ${badge(!w.enabled ? 'maintenance' : w.uncertain ? 'uncertain' : w.status)}</h3><p>${esc(w.url)}</p><p>${w.models.map(esc).join(' · ')}</p><div class="capacity">${Array.from({ length: w.concurrency }, (_, i) => `<span class="${i < w.occupied ? 'filled' : ''}"></span>`).join('')}</div><p>${w.occupied} / ${w.concurrency} places occupées${w.uncertain ? ` · ${w.uncertain} à vérifier` : ''}</p><div class="actions">${button('edit-worker', w.id, 'Modifier')}${button('probe-worker', w.id, 'Vérifier')}${w.uncertain ? button('release-worker', w.id, 'Confirmer l’arrêt', 'danger') : ''}</div></article>`).join('') || '<p class="empty">Aucun worker déclaré.</p>'}</div>` +
+      `<div class="worker-grid">${snapshot.workers.map((w) => `<article class="worker"><h3>${esc(w.name)} ${badge(!w.enabled ? 'maintenance' : w.uncertain ? 'uncertain' : w.status)}</h3><p>${esc(w.url)}</p><p>${w.models.map(esc).join(' · ')}${w.stops_on_disconnect ? ' · arrêt fiable à la déconnexion' : ''}</p><div class="capacity">${Array.from({ length: w.concurrency }, (_, i) => `<span class="${i < w.occupied ? 'filled' : ''}"></span>`).join('')}</div><p>${w.occupied} / ${w.concurrency} places occupées${w.uncertain ? ` · ${w.uncertain} à vérifier` : ''}</p><div class="actions">${button('edit-worker', w.id, 'Modifier')}${button('probe-worker', w.id, 'Vérifier')}${w.uncertain ? button('release-worker', w.id, 'Confirmer l’arrêt', 'danger') : ''}</div></article>`).join('') || '<p class="empty">Aucun worker déclaré.</p>'}</div>` +
       card(
         'Catalogue des modèles',
         table(
@@ -511,7 +511,13 @@ function editWorker(w) {
         'Identifiants du catalogue séparés par des virgules.',
       ) +
       field('concurrency', 'Générations simultanées', w?.concurrency || 1, 'number') +
-      field('enabled', 'Accepter de nouveaux jobs', w?.enabled ?? true, 'checkbox'),
+      field('enabled', 'Accepter de nouveaux jobs', w?.enabled ?? true, 'checkbox') +
+      field(
+        'stops_on_disconnect',
+        'Arrêt fiable à la fermeture de la connexion (vLLM, llama.cpp, LM Studio)',
+        w?.stops_on_disconnect ?? false,
+        'checkbox',
+      ),
     async (el, data) =>
       api(w ? `/workers/${w.id}` : '/workers', w ? 'PUT' : 'POST', {
         name: data.get('name'),
@@ -520,6 +526,7 @@ function editWorker(w) {
         models: split(data.get('models')),
         concurrency: Number(data.get('concurrency')),
         enabled: data.has('enabled'),
+        stops_on_disconnect: data.has('stops_on_disconnect'),
       }),
   );
 }

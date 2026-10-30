@@ -18,7 +18,7 @@ La commande de création demande le mot de passe en saisie masquée (12 caractè
 Dans l’administration :
 
 1. Déclarer un modèle avec son identifiant exact, son contexte, sa sortie maximale et ses capacités vision.
-2. Déclarer un worker avec son URL de base **incluant `/v1` si nécessaire**, sa clé et ses modèles. Le contrôle appelle `GET {base}/models` ; la génération appelle `POST {base}/chat/completions`.
+2. Déclarer un worker avec son URL de base **incluant `/v1` si nécessaire**, sa clé et ses modèles. Le contrôle appelle `GET {base}/models` ; la génération appelle `POST {base}/chat/completions`. Cocher **Arrêt fiable à la fermeture de la connexion** si le serveur interrompt la génération quand la requête HTTP est fermée (vLLM, llama.cpp, LM Studio) : voir [Pannes et tentatives incertaines](#pannes-et-tentatives-incertaines).
 3. Créer une application, ses quotas éventuels et ses destinations de callback. Conserver son secret de signature.
 4. Créer une clé d’API. Elle n’est affichée qu’une fois. Par défaut, l’application demande un identifiant utilisateur ; désactiver cette obligation pour les traitements techniques sans utilisateur.
 5. Appeler l’API depuis le serveur applicatif, avec `Authorization: Bearer …` et, si nécessaire, `X-End-User-ID`.
@@ -41,9 +41,9 @@ curl http://127.0.0.1:3000/v1/jobs \
 - Les quotas d’application, de clé et d’utilisateur s’appliquent ensemble. Une exception utilisateur remplace seulement sa politique utilisateur par défaut. Un utilisateur est identifié par le couple application/identifiant externe.
 - Chaque politique choisit entrée, sortie ou les deux. Crédit et plusieurs fenêtres glissantes sont cumulables et désactivables. Sans règle active, aucun quota de tokens ne limite la clé ; les limites globales de capacité et de file restent applicables.
 - Le budget estimé réserve l’entrée et la sortie maximale. L’estimation vision utilise un forfait configurable par image. Une sortie non précisée utilise le maximum configuré du modèle. Le comptage réel régularise la consommation ; un dépassement résiduel crée une dette et bloque les demandes suivantes.
-- Les appels rejetés par un worker sans génération comptent zéro token. Une interruption dont le résultat est inconnu réserve comptablement l’estimation maximale, marquée comme estimée. Les tentatives restent distinctes dans le registre de consommation.
+- Les appels rejetés par un worker sans génération comptent zéro token. Une interruption dont le résultat est inconnu réserve comptablement l’estimation maximale, marquée comme estimée. Une annulation sur un worker à arrêt fiable compte les caractères déjà reçus en streaming (au plus la sortie maximale), ou la sortie maximale sans streaming, également marqués comme estimés. Les tentatives restent distinctes dans le registre de consommation.
 - Les callbacks sont persistants, signés et réessayés pendant 24 heures. Leur livraison peut se répéter ; le destinataire déduplique `X-Event-ID`. Une panne de livraison ne relance pas la génération.
-- En streaming, le client reçoit immédiatement `X-Job-ID`, puis des commentaires SSE pendant l’attente et les fragments OpenAI pendant la génération. Le statut se consulte séparément. Une déconnexion annule la demande. Aucun rejeu après le premier fragment exposé.
+- En streaming, le client reçoit immédiatement `X-Job-ID`, puis des commentaires SSE pendant l’attente et les fragments OpenAI pendant la génération. Le statut se consulte séparément. Une déconnexion annule la demande et ferme la requête au worker. Aucun rejeu après le premier fragment exposé.
 
 ## Exploitation et sécurité
 
@@ -60,9 +60,16 @@ Configuration complète dans `.env.example`. `npm run init` crée `.env` sans é
 
 ### Pannes et tentatives incertaines
 
-Une rupture réseau ou un arrêt du service ne prouve pas l’arrêt d’un calcul distant. La tentative devient **incertaine** et continue d’occuper une place. Les autres places restent utilisables jusqu’à son échéance ; après celle-ci, le worker est exclu des attributions tant que l’incertitude subsiste. Un contrôle HTTP réussi ne suffit pas à libérer cette place.
+Une rupture réseau, un délai de tentative dépassé ou un arrêt du service ne prouve pas l’arrêt d’un calcul distant. La tentative devient **incertaine** et continue d’occuper une place. Les autres places restent utilisables jusqu’à son échéance ; après celle-ci, le worker est exclu des attributions tant que l’incertitude subsiste. Un contrôle HTTP réussi ne suffit pas à libérer cette place.
 
 Après vérification ou arrêt des calculs sur le worker, utiliser **Confirmer l’arrêt** dans l’administration. Ce choix conservateur évite de surcharger le serveur distant après une annulation. Les appels HTTP OpenAI compatibles n’offrent pas tous un accusé d’annulation fiable. Une reprise sur un autre worker peut néanmoins doubler du calcul ; un seul résultat final est enregistré.
+
+**Annulations décidées par le service.** Quand le service ferme lui-même la requête au worker — client de streaming déconnecté (bouton « Arrêter », onglet fermé) ou `POST /v1/jobs/{id}/cancel` sur un job en cours — le résultat dépend du réglage du worker :
+
+- **Arrêt fiable à la fermeture de la connexion** coché : la tentative se termine `cancelled`, sa place est libérée aussitôt et le worker reste disponible, sans confirmation. À réserver aux serveurs qui interrompent réellement le calcul à la fermeture de la connexion HTTP (vLLM, llama.cpp/llama-server, LM Studio). Vérifier ce comportement sur la version déployée, et le désactiver derrière un intermédiaire qui maintiendrait la requête vers le serveur d’inférence.
+- Non coché (par défaut, et pour les workers existants) : la tentative devient incertaine, comme ci-dessus.
+
+Ce réglage par worker a été préféré à une libération automatique après un court délai : un délai fixe bloquerait inutilement une place sur un serveur qui s’arrête immédiatement, et libérerait à tort une place sur un serveur qui continue de générer jusqu’à la sortie maximale. Les ruptures réseau, délais dépassés et redémarrages restent incertains quel que soit ce réglage, car le service n’a alors pas lui-même fermé la connexion de façon contrôlée.
 
 Un arrêt propre conserve pour reprise les jobs asynchrones réessayables et annule les chats déconnectés. Après crash, les jobs en attente reprennent ; les tentatives actives deviennent incertaines et leur consommation est estimée une seule fois. Trois tentatives maximum, délai d’attente initial conservé.
 
