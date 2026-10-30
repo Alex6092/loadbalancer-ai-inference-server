@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Providence · Ordonnanceur IA</title>
+    <link rel="stylesheet" href="/admin/style.css" />
+    <script type="module" src="/admin/app.js"></script>
+  </head>
+  <body>
+    <section id="login" class="login" hidden>
+      <form id="login-form" class="login-card">
+        <div class="logo">P<span>·</span></div>
+        <p class="eyebrow">LA PROVIDENCE</p>
+        <h1>Ordonnanceur IA</h1>
+        <p class="muted">L’activité de vos modèles, au même endroit.</p>
+        <label>Identifiant<input name="username" autocomplete="username" required autofocus /></label
+        ><label
+          >Mot de passe<input name="password" type="password" autocomplete="current-password" required
+        /></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button class="primary">Se connecter →</button>
+      </form>
+    </section>
+    <div id="shell" class="shell" hidden>
+      <aside>
+        <a class="brand" href="/admin/"
+          ><div class="logo small">P<span>·</span></div>
+          <div>LA PROVIDENCE<small>Ordonnanceur IA</small></div></a
+        >
+        <p class="nav-label">PILOTAGE</p>
+        <nav aria-label="Navigation principale">
+          <button data-page="overview">◈ Vue d’ensemble</button
+          ><button data-page="queue">≡ Jobs et file d’attente</button
+          ><button data-page="workers">▤ Workers et modèles</button
+          ><button data-page="applications">▦ Applications et clés</button
+          ><button data-page="users">♙ Utilisateurs et quotas</button
+          ><button data-page="usage">▥ Consommation</button><button data-page="callbacks">↗ Callbacks</button
+          ><button data-page="settings">⚙ Administration</button>
+        </nav>
+        <footer>
+          <span id="live-status" class="live">● Actualisation en direct</span><small id="account-name"></small
+          ><button id="logout" class="quiet">Se déconnecter</button>
+        </footer>
+      </aside>
+      <main>
+        <header><span>INFRASTRUCTURE / IA</span><span id="last-refresh">Connexion…</span></header>
+        <section id="content"></section>
+      </main>
+    </div>
+    <dialog id="modal">
+      <div class="modal-head">
+        <h2 id="modal-title"></h2>
+        <button id="close-modal" aria-label="Fermer">×</button>
+      </div>
+      <div id="modal-body"></div>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+  </body>
+</html>

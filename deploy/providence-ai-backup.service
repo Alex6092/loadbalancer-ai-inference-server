@@ -1,0 +1,15 @@
+[Unit]
+Description=Sauvegarde SQLite de l’ordonnanceur IA
+
+[Service]
+Type=oneshot
+User=providence-ai
+Group=providence-ai
+WorkingDirectory=/opt/providence-ai
+EnvironmentFile=/etc/providence-ai/service.env
+ExecStart=/usr/bin/node /opt/providence-ai/scripts/backup.js
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/providence-ai

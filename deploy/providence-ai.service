@@ -1,0 +1,25 @@
+[Unit]
+Description=La Providence - Ordonnanceur IA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=providence-ai
+Group=providence-ai
+WorkingDirectory=/opt/providence-ai
+EnvironmentFile=/etc/providence-ai/service.env
+ExecStart=/usr/bin/node /opt/providence-ai/src/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/providence-ai
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

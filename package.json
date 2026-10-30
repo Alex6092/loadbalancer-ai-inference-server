@@ -1,0 +1,38 @@
+{
+  "name": "mprovi-ailoadbalancer",
+  "version": "1.0.0",
+  "description": "File persistante et ordonnanceur de générations IA pour La Providence",
+  "private": true,
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "init": "node scripts/init.js",
+    "admin:create": "node --env-file-if-exists=.env scripts/create-admin.js",
+    "backup": "node --env-file-if-exists=.env scripts/backup.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node scripts/check.js",
+    "format": "prettier --write src scripts public test examples/*.js docs/*.md README.md package.json .prettierrc.json",
+    "api:generate": "node scripts/build-openapi.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/rate-limit": "^11.2.1",
+    "@fastify/static": "^10.1.8",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.12.7",
+    "ipaddr.js": "^2.5.0"
+  },
+  "devDependencies": {
+    "@apidevtools/swagger-parser": "^13.1.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "prettier": "^3.9.10"
+  }
+}
