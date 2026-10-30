@@ -3,6 +3,17 @@ import { ApiError, decrypt, json, parse } from './security.js';
 import { terminal } from './service.js';
 
 const waitError = (code, message) => ({ code, message });
+// Abort reason used only when the service itself closes the worker connection.
+const CANCELLED = 'cancelled';
+const deltaLength = (delta = {}) =>
+  ['content', 'refusal', 'reasoning_content', 'reasoning'].reduce(
+    (n, k) => n + (typeof delta[k] === 'string' ? delta[k].length : 0),
+    0,
+  ) +
+  (delta.tool_calls || []).reduce(
+    (n, t) => n + (t.function?.name?.length || 0) + (t.function?.arguments?.length || 0),
+    0,
+  );
 
 function rotatePick(values, previous) {
   const unique = [...new Set(values)].sort();
@@ -116,7 +127,7 @@ export class Scheduler {
     const run = this.running.get(jobId);
     if (run) {
       run.cancelled = true;
-      run.controller.abort(new Error('cancelled'));
+      run.controller.abort(new Error(CANCELLED));
     }
   }
 
@@ -361,6 +372,7 @@ export class Scheduler {
     let result;
     let failure;
     let uncertain = false;
+    let released = false;
     let retryable = true;
     let response;
     try {
@@ -404,7 +416,12 @@ export class Scheduler {
             ? error.message
             : 'Communication avec le worker interrompue ou réponse invalide.',
       };
-      uncertain = controller.signal.aborted || !response || response.ok;
+      // Closing the connection ourselves stops generation only on workers declared to honour it.
+      released =
+        run.cancelled &&
+        controller.signal.reason?.message === CANCELLED &&
+        Boolean(worker.stops_on_disconnect);
+      uncertain = !released && (controller.signal.aborted || !response || response.ok);
       if (!run.cancelled && ![400, 422].includes(response?.status))
         this.db
           .prepare(
@@ -413,10 +430,14 @@ export class Scheduler {
           .run(failure.code, worker.id);
     } finally {
       clearTimeout(timer);
+      // Without streamed text, nothing bounds what the worker produced before stopping.
+      const stoppedOutput = run.received
+        ? Math.min(job.estimated_output, run.characters)
+        : job.estimated_output;
       usage ||= run.usage;
       usage ||= {
         prompt_tokens: response && !response.ok ? 0 : job.estimated_input,
-        completion_tokens: uncertain ? job.estimated_output : 0,
+        completion_tokens: uncertain ? job.estimated_output : released ? stoppedOutput : 0,
         estimated: true,
       };
       this.db
@@ -427,7 +448,7 @@ export class Scheduler {
               'UPDATE attempts SET status = ?, finished_at = ?, hold_until = ?, error = ? WHERE id = ?',
             )
             .run(
-              uncertain ? 'uncertain' : failure ? 'failed' : 'succeeded',
+              uncertain ? 'uncertain' : released ? 'cancelled' : failure ? 'failed' : 'succeeded',
               Date.now(),
               uncertain ? deadline : null,
               failure ? json(failure) : null,
@@ -472,10 +493,17 @@ export class Scheduler {
       const data = json(chunk);
       chunks.push(chunk);
       run.received = true;
+      for (const choice of chunk.choices) run.characters += Math.max(1, deltaLength(choice.delta));
       if (client && !run.cancelled) {
         // Mark before writing: retrying after any attempted exposure could duplicate output.
         run.exposed = true;
-        await client.write(`data: ${data}\n\n`);
+        try {
+          await client.write(`data: ${data}\n\n`);
+        } catch (error) {
+          // The client is gone: this is a cancellation decided by the service, not a worker failure.
+          this.abort(job.id);
+          throw error;
+        }
       }
     };
     const event = async (text) => {

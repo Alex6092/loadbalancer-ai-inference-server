@@ -210,6 +210,119 @@ test('Arrêt d’un calcul : consommation estimée, tentative incertaine et lib�
   assert.equal(f.scheduler.occupied(id), 0);
 });
 
+async function disconnectMidStream(t, stopsOnDisconnect) {
+  const f = await fixture(t);
+  const worker = await mockWorker(t, { tokenDelay: 2000 });
+  const id = addWorker(f, worker);
+  f.db.prepare('UPDATE workers SET stops_on_disconnect=? WHERE id=?').run(stopsOnDisconnect ? 1 : 0, id);
+  await f.app.listen({ port: 0, host: '127.0.0.1' });
+  // A raw socket makes the disconnection explicit, as when a browser tab is closed.
+  const job = await new Promise((resolve, reject) => {
+    const request = http.request(`${f.app.listeningOrigin}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...f.headers, 'Content-Type': 'application/json' },
+    });
+    request.on('error', () => {});
+    request.on('response', (response) => {
+      let text = '';
+      response.on('data', (chunk) => {
+        text += chunk;
+        if (text.includes('"content":"Bon"')) {
+          request.destroy();
+          resolve(response.headers['x-job-id']);
+        }
+      });
+      response.on('end', () => reject(new Error('Flux terminé avant la déconnexion.')));
+    });
+    request.end(JSON.stringify({ ...f.request, stream: true }));
+  });
+  await until(() => f.scheduler.running.size === 0 && worker.active === 0);
+  return { f, worker, id, job };
+}
+
+test('Déconnexion du client pendant le streaming : place libérée si le worker s’arrête à la fermeture', async (t) => {
+  const { f, worker, id, job } = await disconnectMidStream(t, true);
+  assert.equal(f.service.get(job).status, 'cancelled');
+  assert.equal(f.db.prepare('SELECT status FROM attempts WHERE job_id=?').get(job).status, 'cancelled');
+  assert.equal(f.scheduler.occupied(id), 0);
+  const row = f.db.prepare('SELECT * FROM workers WHERE id=?').get(id);
+  assert.equal(row.status, 'available');
+  assert.ok(f.scheduler.usable(row, Date.now() + 86400000));
+  const usage = f.service.publicJob(f.service.get(job)).usage;
+  assert.equal(usage.estimated, true);
+  assert.equal(usage.completion_tokens, 'Bon'.length);
+  const next = (await f.inject('/v1/jobs', f.request)).json();
+  await until(() => f.service.get(next.id).status === 'succeeded');
+  assert.equal(worker.calls, 2);
+});
+
+test('Déconnexion du client pendant le streaming : tentative incertaine sans arrêt fiable déclaré', async (t) => {
+  const { f, id, job } = await disconnectMidStream(t, false);
+  assert.equal(f.service.get(job).status, 'cancelled');
+  assert.equal(f.db.prepare('SELECT status FROM attempts WHERE job_id=?').get(job).status, 'uncertain');
+  assert.equal(f.scheduler.occupied(id), 1);
+});
+
+test('Annulation explicite d’un job asynchrone en cours : place libérée avec arrêt fiable', async (t) => {
+  const f = await fixture(t);
+  const worker = await mockWorker(t, { hang: true });
+  const id = addWorker(f, worker);
+  const headers = await adminLogin(f);
+  const settings = { name: 'Worker', url: worker.url, models: ['test-model'], concurrency: 1, enabled: true };
+  const update = (payload) =>
+    f.app.inject({ method: 'PUT', url: `/admin/api/workers/${id}`, headers, payload });
+  assert.equal((await update({ ...settings, stops_on_disconnect: true })).json().stops_on_disconnect, true);
+  // A client unaware of the field keeps the current choice.
+  assert.equal((await update(settings)).json().stops_on_disconnect, true);
+  await until(() => f.db.prepare('SELECT status FROM workers WHERE id=?').get(id).status === 'available');
+  const job = (await f.inject('/v1/jobs', f.request)).json();
+  await until(() => worker.calls === 1);
+  assert.equal((await f.inject(`/v1/jobs/${job.id}/cancel`, {})).json().status, 'cancelled');
+  await until(() => f.scheduler.running.size === 0 && worker.active === 0);
+  assert.equal(f.db.prepare('SELECT status FROM attempts WHERE job_id=?').get(job.id).status, 'cancelled');
+  assert.equal(f.scheduler.occupied(id), 0);
+  assert.equal(f.db.prepare('SELECT status FROM workers WHERE id=?').get(id).status, 'available');
+  const usage = f.service.publicJob(f.service.get(job.id)).usage;
+  assert.equal(usage.estimated, true);
+  assert.equal(usage.completion_tokens, f.request.max_tokens);
+  f.service.submit(f.auth(), f.request, 'async');
+  f.scheduler.tick();
+  await until(() => worker.calls === 2);
+});
+
+test('Arrêt fiable déclaré : coupure réseau, délai dépassé et redémarrage restent incertains', async (t) => {
+  const broken = await fixture(t);
+  const brokenWorker = await mockWorker(t, { breakStream: true });
+  const brokenId = addWorker(broken, brokenWorker);
+  broken.db.prepare('UPDATE workers SET stops_on_disconnect=1').run();
+  const response = await broken.inject('/v1/chat/completions', { ...broken.request, stream: true });
+  assert.equal(broken.service.get(response.headers['x-job-id']).status, 'failed');
+  assert.equal(broken.scheduler.occupied(brokenId), 1);
+
+  const f = await fixture(t, { attemptTimeoutMs: 200 });
+  const worker = await mockWorker(t, { hang: true });
+  const id = addWorker(f, worker);
+  f.db.prepare('UPDATE workers SET stops_on_disconnect=1').run();
+  const timedOut = (await f.inject('/v1/jobs', f.request)).json();
+  await until(
+    () => f.db.prepare('SELECT status FROM attempts WHERE job_id=?').get(timedOut.id)?.status === 'uncertain',
+  );
+  const attempt = randomUUID();
+  const running = f.service.submit(f.auth(), f.request, 'async').job;
+  f.db
+    .prepare(
+      "INSERT INTO attempts(id,job_id,worker_id,status,started_at,deadline) VALUES (?,?,?,'running',?,?)",
+    )
+    .run(attempt, running.id, id, Date.now(), Date.now() + 60000);
+  f.db
+    .prepare("UPDATE jobs SET status='running',active_attempt_id=?,attempts=1 WHERE id=?")
+    .run(attempt, running.id);
+  await f.scheduler.stop();
+  f.scheduler.recover();
+  assert.equal(f.db.prepare('SELECT status FROM attempts WHERE id=?').get(attempt).status, 'uncertain');
+  assert.equal(f.scheduler.occupied(id), 2);
+});
+
 test('Reprise après crash : file durable, tentative incertaine comptée une fois, chat interrompu', async (t) => {
   const f = await fixture(t);
   const worker = await mockWorker(t);

@@ -72,6 +72,7 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
     has_secret: Boolean(row.secret),
     models: parse(row.models),
     enabled: Boolean(row.enabled),
+    stops_on_disconnect: Boolean(row.stops_on_disconnect),
     occupied: scheduler.occupied(row.id),
     uncertain: db
       .prepare("SELECT COUNT(*) AS n FROM attempts WHERE worker_id = ? AND status = 'uncertain'")
@@ -392,12 +393,14 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
           json(models),
           integer(body.concurrency ?? 1, 'concurrency', 1, 100),
           bool(body.enabled),
+          // Absent on update keeps the current choice; new workers stay conservative.
+          bool(body.stops_on_disconnect, Boolean(old?.stops_on_disconnect)),
         ];
       };
       admin.post('/workers', async (request) => {
         const id = randomUUID();
         db.prepare(
-          'INSERT INTO workers(id, name, url, secret, models, concurrency, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO workers(id, name, url, secret, models, concurrency, enabled, stops_on_disconnect, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ).run(id, ...workerValues(request.body || {}), Date.now());
         audit(request, 'worker.create', id);
         void scheduler.probe(requireRow('workers', id));
@@ -414,7 +417,7 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
             'Mettre le worker en maintenance et attendre la fin des tentatives avant de modifier son URL, son secret ou ses modèles.',
           );
         db.prepare(
-          "UPDATE workers SET name = ?, url = ?, secret = ?, models = ?, concurrency = ?, enabled = ?, status = 'checking' WHERE id = ?",
+          "UPDATE workers SET name = ?, url = ?, secret = ?, models = ?, concurrency = ?, enabled = ?, stops_on_disconnect = ?, status = 'checking' WHERE id = ?",
         ).run(...values, old.id);
         audit(request, 'worker.update', old.id);
         if (values[5]) void scheduler.probe(requireRow('workers', old.id));
