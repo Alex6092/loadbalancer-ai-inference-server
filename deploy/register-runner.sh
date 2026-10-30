@@ -20,6 +20,7 @@ if [[ ! -f .runner ]]; then
   rm -f -- "$archive"
   ./bin/installdependencies.sh
   chown -R actions-runner:actions-runner /opt/actions-runner
+  chmod 0700 /opt/actions-runner
   runuser -u actions-runner -- ./config.sh --unattended \
     --url https://github.com/Alex6092/loadbalancer-ai-inference-server \
     --token "$registration_token" --name providence-ai-debian-21 \

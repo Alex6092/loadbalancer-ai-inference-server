@@ -77,7 +77,7 @@ nginx -t
 systemctl daemon-reload
 touch /run/providence-ai-maintenance
 systemctl enable --now nginx.service
-systemctl reload nginx.service
+systemctl restart nginx.service
 systemctl enable providence-ai.service
 systemctl enable --now providence-ai-backup.timer
 printf 'VM prête. Enregistrer ensuite le runner GitHub, puis pousser le workflow sur main.\n'

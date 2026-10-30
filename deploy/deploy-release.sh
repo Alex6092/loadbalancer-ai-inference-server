@@ -50,9 +50,9 @@ write_release_environment() {
   chmod 0644 "$release_environment"
 }
 healthy() {
-  local expected=$1 successes=0 body
+  local expected=$1 url=${2:-http://127.0.0.1:3000/health/ready} successes=0 body
   for _ in $(seq 1 40); do
-    body=$(curl --fail --silent --max-time 3 http://127.0.0.1:3000/health/ready) || body=''
+    body=$(curl --fail --silent --max-time 3 "$url") || body=''
     if printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("status")=="ok" and d.get("release")==sys.argv[1] else 1)' "$expected" 2>/dev/null; then
       successes=$((successes+1))
       [[ $successes -ge 3 ]] && return 0
@@ -70,6 +70,7 @@ rollback() {
   set +e
   printf 'Échec du déploiement %s ; récupération.\n' "$revision" >&2
   if [[ $transaction -eq 1 ]]; then
+    touch "$maintenance"
     systemctl stop providence-ai.service
     if [[ -n $backup && -f $backup && $database == "$data/"* && $database != "$data/backups/"* ]]; then
       rm -f -- "${database}-wal" "${database}-shm"
@@ -80,7 +81,7 @@ rollback() {
       write_release_environment "${previous##*/}"
       systemctl reset-failed providence-ai.service
       systemctl start providence-ai.service
-      if healthy "${previous##*/}"; then
+      if healthy "${previous##*/}" && healthy "${previous##*/}" http://172.29.254.21/health/ready; then
         rm -f -- "$maintenance"
         printf 'Version précédente restaurée : %s\n' "${previous##*/}" >&2
       else
@@ -179,6 +180,7 @@ write_release_environment "$revision"
 systemctl reset-failed providence-ai.service
 systemctl start providence-ai.service
 healthy "$revision"
+healthy "$revision" http://172.29.254.21/health/ready
 
 # First installation only: keep the generated login on the VM, never in Actions logs.
 admin_count=$(

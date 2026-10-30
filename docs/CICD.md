@@ -65,7 +65,7 @@ Modifier ensuite le mot de passe dans l’administration et retirer ce fichier a
 2. Préparation de la nouvelle version et `npm ci --omit=dev` sous `providence-build`, avec test de démarrage sur base en mémoire. L’ancienne version reste disponible pendant cette étape.
 3. Activation de la maintenance Nginx, arrêt propre de l’application puis sauvegarde SQLite cohérente. Les callbacks et générations reprennent selon les règles habituelles du service.
 4. Basculement atomique du lien `current`, écriture du SHA et démarrage systemd ; les migrations restent transactionnelles.
-5. Trois contrôles de santé consécutifs, exigeant le bon SHA, puis ouverture de Nginx.
+5. Trois contrôles de santé consécutifs, exigeant le bon SHA, sur le backend puis via Nginx ; ouverture du trafic applicatif après validation des deux parcours. La sonde de santé seule reste accessible pendant la maintenance.
 6. Conservation des cinq versions de code les plus récentes, en gardant aussi la version précédente. Aucune suppression automatique des données ou sauvegardes.
 
 En cas d’échec après l’arrêt, la commande rétablit la sauvegarde SQLite et la version précédente avant de rouvrir Nginx. Sur le tout premier déploiement, il n’y a pas encore de version précédente ; la maintenance reste active en cas d’échec.
