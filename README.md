@@ -1,6 +1,6 @@
 # La Providence — Ordonnanceur IA
 
-Service Node.js qui met en file les générations texte/vision et les distribue à des workers compatibles **OpenAI Chat Completions**. Stockage SQLite, callbacks signés, chat synchrone et streaming SSE, quotas combinables et administration en français. Installation Linux directe ; aucun conteneur requis.
+Service Node.js qui met en file les générations texte/vision et les distribue à des workers compatibles **OpenAI Chat Completions** ou **Anthropic Messages**. L’API applicative conserve le format OpenAI, quel que soit le backend. Stockage SQLite, callbacks signés, chat synchrone et streaming SSE, quotas combinables et administration en français. Installation Linux directe ; aucun conteneur requis.
 
 ## Démarrage local
 
@@ -18,7 +18,7 @@ La commande de création demande le mot de passe en saisie masquée (12 caractè
 Dans l’administration :
 
 1. Déclarer un modèle avec son identifiant exact, son contexte, sa sortie maximale et ses capacités vision.
-2. Déclarer un worker avec son URL de base **incluant `/v1` si nécessaire**, sa clé et ses modèles. Le contrôle appelle `GET {base}/models` ; la génération appelle `POST {base}/chat/completions`. Cocher **Arrêt fiable à la fermeture de la connexion** si le serveur interrompt la génération quand la requête HTTP est fermée (vLLM, llama.cpp, LM Studio) : voir [Pannes et tentatives incertaines](#pannes-et-tentatives-incertaines).
+2. Déclarer un worker avec son protocole, son URL de base **incluant `/v1` si nécessaire**, sa clé et ses modèles. Le contrôle appelle `GET {base}/models` ; la génération appelle `POST {base}/chat/completions` pour OpenAI, ou `POST {base}/messages` pour Anthropic. Cocher **Arrêt fiable à la fermeture de la connexion** si le serveur interrompt la génération quand la requête HTTP est fermée (vLLM, llama.cpp, LM Studio) : voir [Pannes et tentatives incertaines](#pannes-et-tentatives-incertaines).
 3. Créer une application, ses quotas éventuels et ses destinations de callback. Conserver son secret de signature.
 4. Créer une clé d’API. Elle n’est affichée qu’une fois. Par défaut, l’application demande un identifiant utilisateur ; désactiver cette obligation pour les traitements techniques sans utilisateur.
 5. Appeler l’API depuis le serveur applicatif, avec `Authorization: Bearer …` et, si nécessaire, `X-End-User-ID`.
@@ -38,12 +38,23 @@ curl http://127.0.0.1:3000/v1/jobs \
 - L’ordonnanceur remplit toutes les capacités compatibles. Il partage les départs entre applications puis utilisateurs, en conservant l’ordre d’arrivée au sein d’un groupe. Si les deux catégories attendent, trois départs de chat alternent avec un départ asynchrone. Aucune préemption.
 - L’indication d’attente est une **estimation de rang pour le modèle**, calculée à partir des jobs éligibles et de l’état de l’ordonnanceur. Elle change avec les arrivées, priorités, réessais et workers. Elle n’est ni une durée ni une promesse d’ordre global.
 - Les modèles sont déclarés manuellement. Le service ne charge pas les modèles et ne remplace pas silencieusement un modèle par un autre.
+- Les workers OpenAI et Anthropic peuvent coexister. Pour un même modèle, le routage choisit un protocole capable de traduire les paramètres de la demande. Si les seuls workers compatibles sont indisponibles ou en maintenance, le job attend leur retour.
 - Les quotas d’application, de clé et d’utilisateur s’appliquent ensemble. Une exception utilisateur remplace seulement sa politique utilisateur par défaut. Un utilisateur est identifié par le couple application/identifiant externe.
 - Chaque politique choisit entrée, sortie ou les deux. Crédit et plusieurs fenêtres glissantes sont cumulables et désactivables. Sans règle active, aucun quota de tokens ne limite la clé ; les limites globales de capacité et de file restent applicables.
 - Le budget estimé réserve l’entrée et la sortie maximale. L’estimation vision utilise un forfait configurable par image. Une sortie non précisée utilise le maximum configuré du modèle. Le comptage réel régularise la consommation ; un dépassement résiduel crée une dette et bloque les demandes suivantes.
 - Les appels rejetés par un worker sans génération comptent zéro token. Une interruption dont le résultat est inconnu réserve comptablement l’estimation maximale, marquée comme estimée. Une annulation sur un worker à arrêt fiable compte les caractères déjà reçus en streaming (au plus la sortie maximale), ou la sortie maximale sans streaming, également marqués comme estimés. Les tentatives restent distinctes dans le registre de consommation.
 - Les callbacks sont persistants, signés et réessayés pendant 24 heures. Leur livraison peut se répéter ; le destinataire déduplique `X-Event-ID`. Une panne de livraison ne relance pas la génération.
 - En streaming, le client reçoit immédiatement `X-Job-ID`, puis des commentaires SSE pendant l’attente et les fragments OpenAI pendant la génération. Le statut se consulte séparément. Une déconnexion annule la demande et ferme la requête au worker. Aucun rejeu après le premier fragment exposé.
+
+## Worker Anthropic
+
+Dans **Workers et modèles**, choisir **Anthropic Messages**, saisir `https://api.anthropic.com/v1` (ou la base d’un serveur compatible), la clé API et les identifiants des modèles déclarés. La version envoyée dans `anthropic-version` est `2023-06-01` par défaut pour la compatibilité avec les serveurs existants ; elle est configurable. Renseigner le workspace uniquement si la clé l’exige. Le contrôle parcourt le catalogue paginé et résout les alias absents avec `GET {base}/models/{id}`.
+
+Les applications continuent d’utiliser `/v1/jobs` et `/v1/chat/completions` avec les mêmes formats, callbacks et quotas. L’adaptateur traduit texte, vision, streaming et appels d’outils, sans exécuter les outils. Les tokens d’entrée du cache sont inclus dans les quotas, sans pondération tarifaire.
+
+Pour une sortie JSON, fournir `response_format: {"type":"json_schema","json_schema":{"name":"resultat","strict":true,"schema":…}}`. Le mode `json_object` est refusé explicitement sur Anthropic. Les options sans équivalent (par exemple `seed`, pénalités ou `image_url.detail: "high"`) ne sont pas ignorées. Les restrictions du schéma et du modèle sont validées par le backend. La version Anthropic `2026-10-21` retire `temperature` et `top_p` : ces champs sont refusés pour cette version et les suivantes.
+
+Les workers existants restent OpenAI après migration. L’arrêt fiable à la déconnexion reste désactivé par défaut, y compris pour Anthropic. Les authentifications spécifiques AWS Bedrock/Vertex et les fonctions avancées Anthropic ne sont pas incluses. Voir [la matrice de compatibilité](docs/API.md#compatibilite-anthropic), [les versions Anthropic](https://platform.claude.com/docs/en/api/versioning) et [les sorties structurées](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 
 ## Exploitation et sécurité
 

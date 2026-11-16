@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, decrypt, json, parse } from './security.js';
 import { terminal } from './service.js';
+import { providerFor, compatibilityError } from './providers.js';
 
 const waitError = (code, message) => ({ code, message });
 // Abort reason used only when the service itself closes the worker connection.
@@ -13,7 +14,9 @@ const deltaLength = (delta = {}) =>
   (delta.tool_calls || []).reduce(
     (n, t) => n + (t.function?.name?.length || 0) + (t.function?.arguments?.length || 0),
     0,
-  );
+  ) +
+  (delta.function_call?.name?.length || 0) +
+  (delta.function_call?.arguments?.length || 0);
 
 function rotatePick(values, previous) {
   const unique = [...new Set(values)].sort();
@@ -88,7 +91,10 @@ export class Scheduler {
     const workers = this.db
       .prepare('SELECT * FROM workers WHERE enabled = 1')
       .all()
-      .filter((w) => parse(w.models).includes(job.model));
+      .filter(
+        (w) =>
+          parse(w.models).includes(job.model) && (!job.request || !compatibilityError(w, parse(job.request))),
+      );
     const available = workers.filter((w) => this.usable(w, now));
     const jobs = this.db
       .prepare("SELECT * FROM jobs WHERE status = 'queued' AND model = ? AND available_at <= ? ORDER BY seq")
@@ -195,18 +201,19 @@ export class Scheduler {
     if (this.probing.has(worker.id) || this.stopping) return;
     this.probing.add(worker.id);
     try {
-      const response = await fetch(`${worker.url.replace(/\/$/, '')}/models`, {
-        headers: this.headers(worker),
-        signal: AbortSignal.timeout(this.config.probeTimeoutMs),
-        redirect: 'error',
+      const signal = AbortSignal.timeout(this.config.probeTimeoutMs);
+      await providerFor(worker).probe(worker, async (path) => {
+        const response = await fetch(`${worker.url.replace(/\/$/, '')}${path}`, {
+          headers: this.headers(worker),
+          signal,
+          redirect: 'error',
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return this.readJson(response, 1024 * 1024);
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await this.readJson(response, 1024 * 1024);
-      if (
-        !Array.isArray(body.data) ||
-        !parse(worker.models).every((id) => body.data.some((m) => m.id === id))
-      )
-        throw new Error('Catalogue des modèles incomplet.');
       this.db
         .prepare(
           "UPDATE workers SET status = 'available', failures = 0, error = NULL, last_check = ?, last_success = ? WHERE id = ?",
@@ -226,7 +233,7 @@ export class Scheduler {
 
   headers(worker) {
     const secret = decrypt(worker.secret, this.config.encryptionKey);
-    return { 'Content-Type': 'application/json', ...(secret ? { Authorization: `Bearer ${secret}` } : {}) };
+    return { 'Content-Type': 'application/json', ...providerFor(worker).headers(worker, secret) };
   }
 
   tick() {
@@ -264,9 +271,9 @@ export class Scheduler {
     return this.db
       .transaction(() => {
         const now = Date.now();
-        const workers = this.db
-          .prepare("SELECT * FROM workers WHERE enabled = 1 AND status = 'available'")
-          .all()
+        const configured = this.db.prepare('SELECT * FROM workers').all();
+        const workers = configured
+          .filter((w) => w.enabled && w.status === 'available')
           .filter(
             (w) =>
               !this.db
@@ -277,16 +284,26 @@ export class Scheduler {
           )
           .map((w) => ({ ...w, occupied: this.occupied(w.id) }))
           .filter((w) => w.occupied < w.concurrency);
-        if (!workers.length) return null;
         const waiting = this.db
           .prepare(
             "SELECT * FROM jobs WHERE status = 'queued' AND available_at <= ? AND expires_at > ? ORDER BY seq",
           )
           .all(now, now);
+        const eligibleWorkers = new Map();
+        for (const job of waiting) {
+          const request = parse(job.request);
+          const incompatible = this.service.requestCompatibilityError(request, configured);
+          if (incompatible) {
+            this.service.finish(job.id, 'failed', null, incompatible);
+            continue;
+          }
+          eligibleWorkers.set(
+            job.id,
+            workers.filter((w) => parse(w.models).includes(job.model) && !compatibilityError(w, request)),
+          );
+        }
         const candidates = waiting.filter(
-          (job) =>
-            workers.some((w) => parse(w.models).includes(job.model)) &&
-            (job.mode !== 'chat' || this.clients.has(job.id)),
+          (job) => eligibleWorkers.get(job.id)?.length && (job.mode !== 'chat' || this.clients.has(job.id)),
         );
         const state = this.state();
         for (;;) {
@@ -306,8 +323,8 @@ export class Scheduler {
             );
             continue;
           }
-          const worker = workers
-            .filter((w) => parse(w.models).includes(job.model))
+          const worker = eligibleWorkers
+            .get(job.id)
             .sort(
               (a, b) => a.occupied / a.concurrency - b.occupied / b.concurrency || a.id.localeCompare(b.id),
             )[0];
@@ -375,13 +392,17 @@ export class Scheduler {
     let released = false;
     let retryable = true;
     let response;
+    let sent = false;
     try {
       const request = parse(job.request);
-      if (request.stream) request.stream_options = { ...request.stream_options, include_usage: true };
-      response = await fetch(`${worker.url.replace(/\/$/, '')}/chat/completions`, {
+      const provider = providerFor(worker);
+      const body = provider.prepare(request, worker);
+      const headers = this.headers(worker);
+      sent = true;
+      response = await fetch(`${worker.url.replace(/\/$/, '')}${provider.path}`, {
         method: 'POST',
-        headers: this.headers(worker),
-        body: json(request),
+        headers,
+        body: json(body),
         signal: controller.signal,
         redirect: 'error',
       });
@@ -395,9 +416,9 @@ export class Scheduler {
         );
       }
       if (request.stream) {
-        ({ result, usage } = await this.consumeStream(response, job, run));
+        ({ result, usage } = await this.consumeStream(response, job, run, provider, request));
       } else {
-        result = await this.readJson(response);
+        result = provider.response(await this.readJson(response), request);
         if (!Array.isArray(result.choices) || !result.choices.length)
           throw new Error('Réponse du worker invalide.');
         if (this.validUsage(result.usage)) usage = { ...result.usage, estimated: false };
@@ -421,8 +442,9 @@ export class Scheduler {
         run.cancelled &&
         controller.signal.reason?.message === CANCELLED &&
         Boolean(worker.stops_on_disconnect);
-      uncertain = !released && (controller.signal.aborted || !response || response.ok);
-      if (!run.cancelled && ![400, 422].includes(response?.status))
+      uncertain = sent && !released && (controller.signal.aborted || !response || response.ok);
+      if (!sent) retryable = false;
+      if (sent && !run.cancelled && ![400, 422].includes(response?.status))
         this.db
           .prepare(
             "UPDATE workers SET status = 'unavailable', failures = failures + 1, error = ? WHERE id = ?",
@@ -436,7 +458,7 @@ export class Scheduler {
         : job.estimated_output;
       usage ||= run.usage;
       usage ||= {
-        prompt_tokens: response && !response.ok ? 0 : job.estimated_input,
+        prompt_tokens: !sent || (response && !response.ok) ? 0 : job.estimated_input,
         completion_tokens: uncertain ? job.estimated_output : released ? stoppedOutput : 0,
         estimated: true,
       };
@@ -480,14 +502,9 @@ export class Scheduler {
     }
   }
 
-  async consumeStream(response, job, run) {
-    const decoder = new TextDecoder();
-    let buffer = '';
+  async consumeStream(response, job, run, provider, request) {
     let usage;
-    let doneEvent = false;
-    let bytes = 0;
     const chunks = [];
-    const reader = response.body.getReader();
     const client = this.clients.get(job.id);
     const forward = async (chunk) => {
       const data = json(chunk);
@@ -506,92 +523,64 @@ export class Scheduler {
         }
       }
     };
-    const event = async (text) => {
-      const data = text
-        .split('\n')
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n');
-      if (!data) return;
-      if (data === '[DONE]') {
-        doneEvent = true;
-        return;
-      }
-      const chunk = JSON.parse(data);
-      if (chunk.error) throw new Error('Erreur dans le flux du worker.');
-      if (!Array.isArray(chunk.choices)) throw new Error('Fragment SSE invalide.');
+    for await (const chunk of provider.stream(response, request, this.config.bodyLimit)) {
       if (this.validUsage(chunk.usage)) {
         usage = { ...chunk.usage, estimated: false };
         run.usage = usage;
       }
       await forward(chunk);
-    };
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.length;
-        if (bytes > this.config.bodyLimit) throw new Error('Flux trop volumineux.');
-        buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
-        let boundary;
-        while ((boundary = buffer.indexOf('\n\n')) !== -1) {
-          const text = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          await event(text);
-          if (doneEvent) break;
-        }
-        if (doneEvent) break;
-      }
-      if (!doneEvent) throw new Error('Flux interrompu avant [DONE].');
-      const choices = new Map();
-      for (const chunk of chunks)
-        for (const choice of chunk.choices) {
-          const current = choices.get(choice.index) || {
-            index: choice.index,
-            message: { role: 'assistant', content: '' },
-            finish_reason: null,
-          };
-          const delta = choice.delta || {};
-          if (delta.content) current.message.content += delta.content;
-          if (delta.refusal) current.message.refusal = (current.message.refusal || '') + delta.refusal;
-          if (delta.tool_calls) {
-            current.message.tool_calls ||= [];
-            for (const tool of delta.tool_calls) {
-              const prev = (current.message.tool_calls[tool.index] ||= {
-                id: '',
-                type: 'function',
-                function: { name: '', arguments: '' },
-              });
-              if (tool.id) prev.id += tool.id;
-              if (tool.function?.name) prev.function.name += tool.function.name;
-              if (tool.function?.arguments) prev.function.arguments += tool.function.arguments;
-            }
-          }
-          if (choice.finish_reason) current.finish_reason = choice.finish_reason;
-          choices.set(choice.index, current);
-        }
-      const finalChoices = [...choices.values()];
-      if (!finalChoices.length) throw new Error('Flux terminé sans réponse.');
-      usage ||= {
-        prompt_tokens: job.estimated_input,
-        completion_tokens: Math.min(job.estimated_output, json(finalChoices).length),
-        estimated: true,
-      };
-      const first = chunks[0] || {};
-      return {
-        result: {
-          id: first.id || job.id,
-          object: 'chat.completion',
-          created: first.created || Math.floor(Date.now() / 1000),
-          model: job.model,
-          choices: finalChoices,
-          usage,
-        },
-        usage,
-      };
-    } finally {
-      await reader.cancel().catch(() => {});
     }
+    const choices = new Map();
+    for (const chunk of chunks)
+      for (const choice of chunk.choices) {
+        const current = choices.get(choice.index) || {
+          index: choice.index,
+          message: { role: 'assistant', content: '' },
+          finish_reason: null,
+        };
+        const delta = choice.delta || {};
+        if (delta.content) current.message.content += delta.content;
+        if (delta.refusal) current.message.refusal = (current.message.refusal || '') + delta.refusal;
+        if (delta.function_call) {
+          current.message.function_call ||= { name: '', arguments: '' };
+          current.message.function_call.name += delta.function_call.name || '';
+          current.message.function_call.arguments += delta.function_call.arguments || '';
+        }
+        if (delta.tool_calls) {
+          current.message.tool_calls ||= [];
+          for (const tool of delta.tool_calls) {
+            const prev = (current.message.tool_calls[tool.index] ||= {
+              id: '',
+              type: 'function',
+              function: { name: '', arguments: '' },
+            });
+            if (tool.id) prev.id += tool.id;
+            if (tool.function?.name) prev.function.name += tool.function.name;
+            if (tool.function?.arguments) prev.function.arguments += tool.function.arguments;
+          }
+        }
+        if (choice.finish_reason) current.finish_reason = choice.finish_reason;
+        choices.set(choice.index, current);
+      }
+    const finalChoices = [...choices.values()];
+    if (!finalChoices.length) throw new Error('Flux terminé sans réponse.');
+    usage ||= {
+      prompt_tokens: job.estimated_input,
+      completion_tokens: Math.min(job.estimated_output, json(finalChoices).length),
+      estimated: true,
+    };
+    const first = chunks[0] || {};
+    return {
+      result: {
+        id: first.id || job.id,
+        object: 'chat.completion',
+        created: first.created || Math.floor(Date.now() / 1000),
+        model: job.model,
+        choices: finalChoices,
+        usage,
+      },
+      usage,
+    };
   }
 
   async stop() {

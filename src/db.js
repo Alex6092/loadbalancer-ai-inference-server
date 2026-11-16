@@ -80,6 +80,9 @@ const migrations = [
   CREATE TABLE scheduler_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);`,
   // Workers known to stop generating when the HTTP connection closes (vLLM, llama.cpp, LM Studio).
   `ALTER TABLE workers ADD COLUMN stops_on_disconnect INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE workers ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai' CHECK(provider IN ('openai', 'anthropic'));
+   ALTER TABLE workers ADD COLUMN anthropic_version TEXT NOT NULL DEFAULT '2023-06-01';
+   ALTER TABLE workers ADD COLUMN anthropic_workspace_id TEXT;`,
 ];
 
 export function openDatabase(filename) {

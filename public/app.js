@@ -195,7 +195,7 @@ function render() {
         'Modèles disponibles et capacité de chaque serveur.',
         button('new-model', '', '+ Modèle') + button('new-worker', '', '+ Worker', 'primary'),
       ) +
-      `<div class="worker-grid">${snapshot.workers.map((w) => `<article class="worker"><h3>${esc(w.name)} ${badge(!w.enabled ? 'maintenance' : w.uncertain ? 'uncertain' : w.status)}</h3><p>${esc(w.url)}</p><p>${w.models.map(esc).join(' · ')}${w.stops_on_disconnect ? ' · arrêt fiable à la déconnexion' : ''}</p><div class="capacity">${Array.from({ length: w.concurrency }, (_, i) => `<span class="${i < w.occupied ? 'filled' : ''}"></span>`).join('')}</div><p>${w.occupied} / ${w.concurrency} places occupées${w.uncertain ? ` · ${w.uncertain} à vérifier` : ''}</p><div class="actions">${button('edit-worker', w.id, 'Modifier')}${button('probe-worker', w.id, 'Vérifier')}${w.uncertain ? button('release-worker', w.id, 'Confirmer l’arrêt', 'danger') : ''}</div></article>`).join('') || '<p class="empty">Aucun worker déclaré.</p>'}</div>` +
+      `<div class="worker-grid">${snapshot.workers.map((w) => `<article class="worker"><h3>${esc(w.name)} ${badge(!w.enabled ? 'maintenance' : w.uncertain ? 'uncertain' : w.status)}</h3><p>${w.provider === 'anthropic' ? 'Anthropic Messages' : 'OpenAI Chat Completions'} · ${esc(w.url)}</p><p>${w.models.map(esc).join(' · ')}${w.stops_on_disconnect ? ' · arrêt fiable à la déconnexion' : ''}</p><div class="capacity">${Array.from({ length: w.concurrency }, (_, i) => `<span class="${i < w.occupied ? 'filled' : ''}"></span>`).join('')}</div><p>${w.occupied} / ${w.concurrency} places occupées${w.uncertain ? ` · ${w.uncertain} à vérifier` : ''}</p><div class="actions">${button('edit-worker', w.id, 'Modifier')}${button('probe-worker', w.id, 'Vérifier')}${w.uncertain ? button('release-worker', w.id, 'Confirmer l’arrêt', 'danger') : ''}</div></article>`).join('') || '<p class="empty">Aucun worker déclaré.</p>'}</div>` +
       card(
         'Catalogue des modèles',
         table(
@@ -501,8 +501,31 @@ function editWorker(w) {
   form(
     w ? 'Modifier le worker' : 'Nouveau worker',
     field('name', 'Nom', w?.name) +
-      field('url', 'URL de base OpenAI', w?.url || '', 'url', 'Exemple : http://serveur:8000/v1') +
+      `<label>Protocole<select name="provider"><option value="openai" ${(w?.provider || 'openai') === 'openai' ? 'selected' : ''}>OpenAI Chat Completions</option><option value="anthropic" ${w?.provider === 'anthropic' ? 'selected' : ''}>Anthropic Messages</option></select></label>` +
+      field(
+        'url',
+        'URL de base',
+        w?.url || '',
+        'url',
+        'Exemples : http://serveur:8000/v1 ou https://api.anthropic.com/v1',
+      ) +
       field('secret', w ? 'Nouvelle clé worker (vide : conserver)' : 'Clé d’API worker', '', 'password') +
+      `<div data-anthropic-fields ${w?.provider === 'anthropic' ? '' : 'hidden'}>` +
+      field(
+        'anthropic_version',
+        'Version de l’API Anthropic',
+        w?.anthropic_version || '2023-06-01',
+        'text',
+        '2023-06-01 pour les serveurs compatibles ; 2026-10-21 retire temperature et top_p.',
+      ) +
+      field(
+        'anthropic_workspace_id',
+        'Workspace Anthropic (facultatif)',
+        w?.anthropic_workspace_id || '',
+        'text',
+        'Nécessaire seulement si la clé n’est pas liée à un workspace.',
+      ) +
+      '</div>' +
       field(
         'models',
         'Modèles servis',
@@ -521,7 +544,14 @@ function editWorker(w) {
     async (el, data) =>
       api(w ? `/workers/${w.id}` : '/workers', w ? 'PUT' : 'POST', {
         name: data.get('name'),
+        provider: data.get('provider'),
         url: data.get('url'),
+        ...(data.get('provider') === 'anthropic'
+          ? {
+              anthropic_version: data.get('anthropic_version'),
+              anthropic_workspace_id: data.get('anthropic_workspace_id'),
+            }
+          : {}),
         ...(data.get('secret') || !w ? { secret: data.get('secret') } : {}),
         models: split(data.get('models')),
         concurrency: Number(data.get('concurrency')),
@@ -530,6 +560,12 @@ function editWorker(w) {
       }),
   );
 }
+document.addEventListener('change', (event) => {
+  if (event.target.matches('select[name="provider"]')) {
+    const fields = event.target.closest('form').querySelector('[data-anthropic-fields]');
+    fields.hidden = event.target.value !== 'anthropic';
+  }
+});
 async function loadUsers() {
   users = (await api(`/users?offset=${offset}&app_id=${encodeURIComponent(userApp)}`)).data;
   render();

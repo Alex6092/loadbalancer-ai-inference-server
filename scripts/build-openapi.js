@@ -83,7 +83,11 @@ const completion = {
     top_p: { type: 'number' },
     tools: { type: 'array', items: { type: 'object' } },
     tool_choice: {},
-    response_format: { type: 'object' },
+    response_format: {
+      type: 'object',
+      description:
+        'Options selon le backend. Anthropic accepte text et json_schema (schéma transmis sans modification), mais refuse json_object.',
+    },
     stream_options: { type: 'object' },
   },
 };

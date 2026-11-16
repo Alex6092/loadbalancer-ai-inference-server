@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, hash, json, parse, callbackAllowed, stableStringify } from './security.js';
 import { Quotas } from './quotas.js';
+import { compatibilityError } from './providers.js';
 
 export const terminal = (status) => ['succeeded', 'failed', 'cancelled', 'expired'].includes(status);
 export const millis = (value) => (value == null ? null : new Date(value).toISOString());
@@ -38,6 +39,14 @@ export class Service {
     // Applications share their jobs across keys; end-user credentials never reach this API directly.
     if (!job || job.app_id !== auth.app.id) throw new ApiError(404, 'not_found', 'Job introuvable.');
     return job;
+  }
+
+  requestCompatibilityError(request, workers = this.db.prepare('SELECT * FROM workers').all()) {
+    const serving = workers.filter((worker) => parse(worker.models).includes(request.model));
+    // No declared worker keeps the existing queue-until-available behavior.
+    if (!serving.length) return null;
+    const errors = serving.map((worker) => compatibilityError(worker, request));
+    return errors.every(Boolean) ? errors[0] : null;
   }
 
   validate(body, mode, auth) {
@@ -131,6 +140,8 @@ export class Service {
     const request = { ...body, stream: accessMode === 'stream' };
     delete request.callbackURL;
     if (body.max_completion_tokens == null && body.max_tokens == null) request.max_tokens = output;
+    const incompatible = this.requestCompatibilityError(request);
+    if (incompatible) throw incompatible;
     return { model, input, output, request };
   }
 

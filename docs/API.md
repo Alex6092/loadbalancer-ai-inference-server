@@ -20,7 +20,38 @@ Une liste vide de modèles, modes ou IP signifie aucune restriction de cette cat
 
 `POST /v1/chat/completions` : même ordonnanceur, sans `callbackURL`. Sans streaming, attendre la réponse OpenAI normale. Avec `stream:true`, les en-têtes HTTP et `X-Job-ID` arrivent avant l’attribution. Les commentaires SSE `: queued` / `: heartbeat` ne contiennent pas de résultat. Le client doit les ignorer. Les fragments OpenAI sont suivis de `data: [DONE]`. Si une erreur survient après ouverture du flux, un événement `data: {"error":{…}}` précède `[DONE]` ; le statut HTTP est déjà `200`. Une interruption après le premier fragment n’est pas retentée automatiquement.
 
-Le service transmet `stream_options.include_usage=true` au worker. Si les tokens finaux manquent, leur consommation est estimée et marquée. Les champs d’outils et de sortie structurée sont relayés ; aucune exécution d’outil n’a lieu dans le répartiteur. Seuls texte et images en entrée sont acceptés ; `n=1`. Les paramètres propres aux modèles restent validés par les workers.
+Le service transmet `stream_options.include_usage=true` aux workers OpenAI. Pour Anthropic, il reconstitue le bilan à partir des événements natifs. Si les tokens finaux manquent, leur consommation est estimée et marquée. Les champs d’outils et de sortie structurée sont relayés ou traduits selon le protocole ; aucune exécution d’outil n’a lieu dans le répartiteur. Seuls texte et images en entrée sont acceptés ; `n=1`. Les paramètres propres aux modèles restent validés par les workers.
+
+## Compatibilite Anthropic
+
+L’API applicative reste au format Chat Completions : aucun champ `provider` n’est ajouté aux requêtes clientes. L’administrateur choisit le protocole par worker. Les résultats synchrones, les résultats des jobs et les callbacks contiennent des `choices` OpenAI ; le streaming expose des `chat.completion.chunk` et un seul `[DONE]`. L’identifiant de modèle demandé est conservé, même si Anthropic résout un alias.
+
+| Champ / fonction côté application                 | Traduction vers Anthropic Messages                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `system`, `developer`                             | Instructions regroupées dans `system`, dans leur ordre d’apparition, avant la conversation                    |
+| Texte, `image_url`                                | Blocs texte / image ; URL distante transmise sans téléchargement, data URL convertie en source base64         |
+| `image_url.detail`                                | Absent ou `auto` ; `low` et `high` refusés                                                                    |
+| `max_tokens`, `max_completion_tokens`             | `max_tokens` ; les deux champs restent exclusifs                                                              |
+| `stop`                                            | `stop_sequences`, sous forme de liste                                                                         |
+| `temperature`, `top_p`                            | Transmis entre 0 et 1 avec la version `2023-06-01`, sous réserve du modèle ; refusés à partir de `2026-10-21` |
+| `tools`, `tool_choice`, `parallel_tool_calls`     | Outils clients, choix automatique/aucun/requis/nommé et parallélisme ; conservation de `strict`               |
+| `tool_calls`, messages `tool`                     | Blocs `tool_use` et `tool_result`, avec contrôle des identifiants et des arguments JSON                       |
+| `functions`, `function_call`, messages `function` | Ancien format traduit si non ambigu ; appels parallèles désactivés ; réponses au même ancien format           |
+| `response_format.type=text`                       | Sortie texte normale                                                                                          |
+| `response_format.type=json_schema`                | `output_config.format` avec le schéma fourni, sans réécriture ni suppression de contraintes                   |
+| `response_format.type=json_object`                | Refusé : fournir un schéma explicite                                                                          |
+| `user`                                            | `metadata.user_id` ; utiliser un identifiant opaque                                                           |
+| `stream_options.include_usage`                    | Consommation collectée par le service ; le paramètre OpenAI n’est pas envoyé à Anthropic                      |
+
+Les résultats d’outils doivent suivre leurs appels avant la poursuite de la conversation. Les noms de message utilisateur/assistant et les options sans équivalent (`seed`, pénalités, `logprobs`, etc.) sont refusés. Les fonctions avancées natives (outils serveur, configuration du raisonnement, fichiers, etc.) ne sont pas exposées. Les éventuels blocs de raisonnement reçus ne sont pas renvoyés aux applications ; les tokens de sortie restent comptabilisés.
+
+Les fins `end_turn` / `stop_sequence` deviennent `stop`, `max_tokens` / dépassement de contexte deviennent `length`, `tool_use` devient `tool_calls` (ou `function_call` avec l’ancien format), et `refusal` devient `content_filter`. Une fin inconnue ou un flux interrompu avant `message_stop` est un échec, jamais un succès partiel.
+
+La consommation d’entrée correspond à `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. Les compteurs SSE cumulatifs ne sont pas additionnés entre événements. Les quotas comptent des tokens, pas le montant facturé par le fournisseur.
+
+Si des workers sont déclarés pour le modèle mais qu’aucun ne sait traduire la requête, l’admission renvoie `400 unsupported_worker_parameter` avec `details.provider` et `details.field`, sans créer de job ni réserver de quota. Une modification de configuration peut aussi faire échouer un job en attente avec ce code, avant toute tentative. Si un worker compatible existe mais est indisponible, le job reste en file. En l’absence de tout worker déclaré, le comportement historique d’attente est conservé. Les rejets du backend restent des erreurs `worker_http_*` selon les règles habituelles du chat et des jobs.
+
+Références : [Messages](https://platform.claude.com/docs/en/api/messages/create), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [sorties structurées](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 
 ## Quotas et erreurs
 
@@ -105,4 +136,6 @@ Les routes `/admin/api` utilisent le cookie de session retourné par `POST /logi
 | `/accounts`                                                 | GET / POST : liste / création `{username,password}`                                                                                                                                                                                                                                       |
 | `/accounts/{id}/password`                                   | PUT : `{password}`, révoque les sessions de ce compte                                                                                                                                                                                                                                     |
 
-Pour une maintenance, modifier le worker avec `enabled:false` : aucune nouvelle attribution, les générations actives continuent. Changer son URL, son secret ou ses modèles exige l’absence de tentative active/incertaine. La création d’application fournit un secret callback à copier, et les vues suivantes ne renvoient aucun secret.
+La configuration des workers accepte aussi `provider: "openai" | "anthropic"`, `anthropic_version` (date au format `AAAA-MM-JJ`) et `anthropic_workspace_id` (chaîne facultative). À la création, les valeurs par défaut sont `openai`, `2023-06-01` et aucun workspace. En modification, l’absence de ces champs conserve les valeurs ; un workspace vide ou nul le retire. Les vues d’administration exposent ces champs, jamais le secret. Les en-têtes `x-api-key`, `anthropic-version` et, si renseigné, `anthropic-workspace-id` sont envoyés uniquement aux workers Anthropic.
+
+Pour une maintenance, modifier le worker avec `enabled:false` : aucune nouvelle attribution, les générations actives continuent. Changer son URL, son secret, ses modèles, son protocole, sa version Anthropic ou son workspace exige l’absence de tentative active/incertaine. La création d’application fournit un secret callback à copier, et les vues suivantes ne renvoient aucun secret.

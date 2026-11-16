@@ -386,6 +386,18 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
           throw new ApiError(400, 'unknown_model', 'Déclarer au moins un modèle existant.');
         if (body.secret != null && (typeof body.secret !== 'string' || body.secret.length > 10000))
           throw new ApiError(400, 'invalid_secret', 'Secret invalide.');
+        const provider = body.provider ?? old?.provider ?? 'openai';
+        if (!['openai', 'anthropic'].includes(provider))
+          throw new ApiError(400, 'invalid_provider', 'Choisir openai ou anthropic.');
+        const version = body.anthropic_version ?? old?.anthropic_version ?? '2023-06-01';
+        if (typeof version !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(version))
+          throw new ApiError(400, 'invalid_field', 'Version Anthropic attendue au format AAAA-MM-JJ.');
+        const workspace =
+          body.anthropic_workspace_id === undefined
+            ? (old?.anthropic_workspace_id ?? null)
+            : body.anthropic_workspace_id;
+        if (workspace != null && (typeof workspace !== 'string' || !/^[A-Za-z0-9_-]{0,200}$/.test(workspace)))
+          throw new ApiError(400, 'invalid_field', 'Identifiant de workspace Anthropic invalide.');
         return [
           text(body.name, 'name'),
           url.toString().replace(/\/$/, ''),
@@ -395,12 +407,15 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
           bool(body.enabled),
           // Absent on update keeps the current choice; new workers stay conservative.
           bool(body.stops_on_disconnect, Boolean(old?.stops_on_disconnect)),
+          provider,
+          version,
+          workspace || null,
         ];
       };
       admin.post('/workers', async (request) => {
         const id = randomUUID();
         db.prepare(
-          'INSERT INTO workers(id, name, url, secret, models, concurrency, enabled, stops_on_disconnect, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO workers(id, name, url, secret, models, concurrency, enabled, stops_on_disconnect, provider, anthropic_version, anthropic_workspace_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ).run(id, ...workerValues(request.body || {}), Date.now());
         audit(request, 'worker.create', id);
         void scheduler.probe(requireRow('workers', id));
@@ -410,14 +425,22 @@ export async function registerAdmin(app, service, scheduler, callbacks) {
         const old = requireRow('workers', request.params.id);
         const values = workerValues(request.body || {}, old);
         const occupied = scheduler.occupied(old.id);
-        if (occupied && (values[1] !== old.url || values[2] !== old.secret || values[3] !== old.models))
+        if (
+          occupied &&
+          (values[1] !== old.url ||
+            values[2] !== old.secret ||
+            values[3] !== old.models ||
+            values[7] !== old.provider ||
+            values[8] !== old.anthropic_version ||
+            values[9] !== old.anthropic_workspace_id)
+        )
           throw new ApiError(
             409,
             'worker_busy',
-            'Mettre le worker en maintenance et attendre la fin des tentatives avant de modifier son URL, son secret ou ses modèles.',
+            'Mettre le worker en maintenance et attendre la fin des tentatives avant de modifier sa connexion, son protocole ou ses modèles.',
           );
         db.prepare(
-          "UPDATE workers SET name = ?, url = ?, secret = ?, models = ?, concurrency = ?, enabled = ?, stops_on_disconnect = ?, status = 'checking' WHERE id = ?",
+          "UPDATE workers SET name = ?, url = ?, secret = ?, models = ?, concurrency = ?, enabled = ?, stops_on_disconnect = ?, provider = ?, anthropic_version = ?, anthropic_workspace_id = ?, status = 'checking' WHERE id = ?",
         ).run(...values, old.id);
         audit(request, 'worker.update', old.id);
         if (values[5]) void scheduler.probe(requireRow('workers', old.id));
