@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import Ajv from 'ajv';
 import { fixture, addWorker, mockWorker, until, adminLogin } from './helpers.js';
 import { encrypt, json } from '../src/security.js';
 import { providerFor } from '../src/providers.js';
@@ -106,7 +107,7 @@ async function nativeWorker(t, behavior = {}) {
       state.closed++;
     });
     if (behavior.hang) return;
-    const status = behavior.status || 200;
+    const status = typeof behavior.status === 'function' ? behavior.status(body) : behavior.status || 200;
     res.writeHead(status, {
       'Content-Type': body.stream && status === 200 ? 'text/event-stream' : 'application/json',
     });
@@ -680,7 +681,7 @@ test('Adaptateur : version récente et motifs de fin explicites', () => {
   const worker = { provider: 'anthropic', anthropic_version: '2026-10-21' };
   const provider = providerFor(worker);
   const request = { model: 'test', messages: [{ role: 'user', content: 'x' }], max_tokens: 32 };
-  assert.throws(() => provider.prepare({ ...request, temperature: 1 }, worker), /temperature/);
+  assert.equal(provider.prepare({ ...request, temperature: 0.2 }, worker).temperature, undefined);
   for (const [stop_reason, expected] of [
     ['end_turn', 'stop'],
     ['stop_sequence', 'stop'],
@@ -722,4 +723,155 @@ test('Parseur partagé : flux OpenAI découpé octet par octet et espaces SSE co
   for await (const value of providerFor({ provider: 'openai' }).stream(response, {}, wire.length))
     received.push(value);
   assert.deepEqual(received, [chunk]);
+});
+
+test('Haiku 5.5 : correction structurée avec temperature et score borné en chat, streaming et job', async (t) => {
+  const f = await fixture(t);
+  const model = 'claude-haiku-5-5';
+  f.db.prepare('INSERT INTO models VALUES (?, ?, ?, ?, ?, ?)').run(model, 32768, 8192, 1, 1024, 1);
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      score: { type: 'integer', minimum: 0, maximum: 100, description: 'Pourcentage de maîtrise.' },
+      feedback: { type: 'string' },
+    },
+    required: ['score', 'feedback'],
+  };
+  const result = { score: 75, feedback: 'Réponse satisfaisante.' };
+  const worker = await nativeWorker(t, {
+    status: (body) =>
+      body.temperature !== undefined ||
+      body.top_p !== undefined ||
+      body.output_config?.format.schema.properties.score.minimum !== undefined ||
+      body.output_config?.format.schema.properties.score.maximum !== undefined
+        ? 400
+        : 200,
+    response: answer({ model, content: [{ type: 'text', text: json(result) }] }),
+  });
+  const id = addNative(f, worker);
+  f.db.prepare('UPDATE workers SET models=? WHERE id=?').run(json([model]), id);
+  const request = {
+    model,
+    temperature: 0.2,
+    top_p: 0.9,
+    max_tokens: 6144,
+    messages: [
+      { role: 'system', content: 'Retourne une correction structurée.' },
+      { role: 'user', content: 'Copie fictive.' },
+    ],
+    response_format: { type: 'json_schema', json_schema: { name: 'correction', strict: true, schema } },
+    enable_thinking: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  for (const stream of [false, true]) {
+    const response = await f.inject('/v1/chat/completions', { ...request, stream });
+    assert.equal(response.statusCode, 200, response.body);
+    const job = (await f.inject(`/v1/jobs/${response.headers['x-job-id']}`)).json();
+    assert.equal(job.status, 'succeeded');
+    assert.deepEqual(JSON.parse(job.result.choices[0].message.content), result);
+  }
+  const submitted = await f.inject('/v1/jobs', request);
+  assert.equal(submitted.statusCode, 202, submitted.body);
+  await until(() => f.service.get(submitted.json().id).status === 'succeeded');
+  const stored = JSON.parse(f.service.get(submitted.json().id).request);
+  assert.equal(stored.temperature, 0.2);
+  assert.deepEqual(stored.response_format.json_schema.schema, schema);
+  const score = worker.requests[0].body.output_config.format.schema.properties.score;
+  assert.deepEqual(
+    score.enum,
+    Array.from({ length: 101 }, (_, index) => index),
+  );
+  assert.equal(score.description, schema.properties.score.description);
+  assert.ok(new Ajv().validate(schema, result));
+  assert.ok(!new Ajv().validate(schema, { ...result, score: 101 }));
+});
+
+test('Schémas Anthropic : équivalence des domaines entiers, imbrication et données littérales préservées', () => {
+  const provider = providerFor({ provider: 'anthropic' });
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      score: { type: 'integer', minimum: 0, maximum: 100 },
+      minimum: { type: 'integer', minimum: -2, maximum: 2, enum: [-3, -1, 1, 3] },
+      items: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 3 } },
+      literal: { const: { type: 'integer', minimum: 0, maximum: 100 } },
+    },
+    required: ['score'],
+    $defs: { grade: { type: 'integer', minimum: 0, maximum: 20 } },
+  };
+  const snapshot = json(schema);
+  const request = {
+    model: 'test',
+    messages: [{ role: 'user', content: 'x' }],
+    max_tokens: 32,
+    response_format: { type: 'json_schema', json_schema: { schema } },
+    tools: [{ type: 'function', function: { name: 'grade', strict: true, parameters: schema } }],
+  };
+  const prepared = provider.prepare(request, {});
+  const translated = prepared.output_config.format.schema;
+  const ajv = new Ajv();
+  const before = ajv.compile(schema);
+  const after = ajv.compile(translated);
+  for (const score of [-1, 0, 1, 75, 99, 100, 101, 1.5, '75', null]) {
+    for (const minimum of [-3, -1, 0, 1, 3]) {
+      const example = { score, minimum, items: [0, 3], literal: schema.properties.literal.const };
+      assert.equal(after(example), before(example), json(example));
+    }
+  }
+  assert.deepEqual(translated.properties.minimum.enum, [-1, 1]);
+  assert.deepEqual(translated.properties.literal, schema.properties.literal);
+  assert.deepEqual(
+    translated.$defs.grade.enum,
+    Array.from({ length: 21 }, (_, index) => index),
+  );
+  assert.deepEqual(prepared.tools[0].input_schema, translated);
+  assert.equal(json(schema), snapshot);
+  for (const bounds of [
+    { type: 'number', minimum: 0, maximum: 100 },
+    { type: 'integer', minimum: 0, maximum: 1000000 },
+    { type: 'integer', minimum: 0 },
+    { type: 'integer', minimum: 10, maximum: 5 },
+  ]) {
+    const original = {
+      ...request,
+      response_format: { type: 'json_schema', json_schema: { schema: bounds } },
+    };
+    assert.deepEqual(provider.prepare(original, {}).output_config.format.schema, bounds);
+  }
+  const openai = providerFor({ provider: 'openai' }).prepare(request);
+  assert.deepEqual(openai.response_format.json_schema.schema, schema);
+});
+
+test('Échantillonnage : versions Anthropic et modèles récents sans modifier les autres backends', () => {
+  const provider = providerFor({ provider: 'anthropic' });
+  const request = {
+    model: 'test',
+    messages: [{ role: 'user', content: 'x' }],
+    max_tokens: 32,
+    temperature: 0.2,
+    top_p: 0.8,
+  };
+  for (const model of [
+    'claude-haiku-5-5',
+    'claude-sonnet-5-5',
+    'claude-opus-4-7',
+    'claude-opus-4-8-20260401',
+    'claude-mythos-preview',
+  ]) {
+    const prepared = provider.prepare({ ...request, model }, { anthropic_version: '2023-06-01' });
+    assert.equal(prepared.temperature, undefined, model);
+    assert.equal(prepared.top_p, undefined, model);
+  }
+  for (const model of ['test', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-6']) {
+    assert.equal(provider.prepare({ ...request, model }, {}).temperature, 0.2);
+    const prepared = provider.prepare({ ...request, model }, { anthropic_version: '2026-10-21' });
+    assert.equal(prepared.temperature, undefined);
+    assert.equal(prepared.top_p, undefined);
+  }
+  assert.equal(
+    providerFor({ provider: 'openai' }).prepare({ ...request, model: 'claude-haiku-5-5' }).temperature,
+    0.2,
+  );
 });

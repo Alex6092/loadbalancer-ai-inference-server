@@ -516,7 +516,7 @@ function editWorker(w) {
         'Version de l’API Anthropic',
         w?.anthropic_version || '2023-06-01',
         'text',
-        '2023-06-01 pour les serveurs compatibles ; 2026-10-21 retire temperature et top_p.',
+        '2023-06-01 pour les serveurs compatibles ; avec 2026-10-21, temperature et top_p sont ignorés.',
       ) +
       field(
         'anthropic_workspace_id',

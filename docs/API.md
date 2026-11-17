@@ -26,22 +26,24 @@ Le service transmet `stream_options.include_usage=true` aux workers OpenAI. Pour
 
 L’API applicative reste au format Chat Completions : aucun champ `provider` n’est ajouté aux requêtes clientes. L’administrateur choisit le protocole par worker. Les résultats synchrones, les résultats des jobs et les callbacks contiennent des `choices` OpenAI ; le streaming expose des `chat.completion.chunk` et un seul `[DONE]`. L’identifiant de modèle demandé est conservé, même si Anthropic résout un alias.
 
-| Champ / fonction côté application                 | Traduction vers Anthropic Messages                                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `system`, `developer`                             | Instructions regroupées dans `system`, dans leur ordre d’apparition, avant la conversation                    |
-| Texte, `image_url`                                | Blocs texte / image ; URL distante transmise sans téléchargement, data URL convertie en source base64         |
-| `image_url.detail`                                | Absent ou `auto` ; `low` et `high` refusés                                                                    |
-| `max_tokens`, `max_completion_tokens`             | `max_tokens` ; les deux champs restent exclusifs                                                              |
-| `stop`                                            | `stop_sequences`, sous forme de liste                                                                         |
-| `temperature`, `top_p`                            | Transmis entre 0 et 1 avec la version `2023-06-01`, sous réserve du modèle ; refusés à partir de `2026-10-21` |
-| `tools`, `tool_choice`, `parallel_tool_calls`     | Outils clients, choix automatique/aucun/requis/nommé et parallélisme ; conservation de `strict`               |
-| `tool_calls`, messages `tool`                     | Blocs `tool_use` et `tool_result`, avec contrôle des identifiants et des arguments JSON                       |
-| `functions`, `function_call`, messages `function` | Ancien format traduit si non ambigu ; appels parallèles désactivés ; réponses au même ancien format           |
-| `response_format.type=text`                       | Sortie texte normale                                                                                          |
-| `response_format.type=json_schema`                | `output_config.format` avec le schéma fourni, sans réécriture ni suppression de contraintes                   |
-| `response_format.type=json_object`                | Refusé : fournir un schéma explicite                                                                          |
-| `user`                                            | `metadata.user_id` ; utiliser un identifiant opaque                                                           |
-| `stream_options.include_usage`                    | Consommation collectée par le service ; le paramètre OpenAI n’est pas envoyé à Anthropic                      |
+| Champ / fonction côté application                 | Traduction vers Anthropic Messages                                                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `system`, `developer`                             | Instructions regroupées dans `system`, dans leur ordre d’apparition, avant la conversation                                              |
+| Texte, `image_url`                                | Blocs texte / image ; URL distante transmise sans téléchargement, data URL convertie en source base64                                   |
+| `image_url.detail`                                | Absent ou `auto` ; `low` et `high` refusés                                                                                              |
+| `max_tokens`, `max_completion_tokens`             | `max_tokens` ; les deux champs restent exclusifs                                                                                        |
+| `stop`                                            | `stop_sequences`, sous forme de liste                                                                                                   |
+| `temperature`, `top_p`                            | Ignorés à partir de la version `2026-10-21`, pour Claude 4.7 et ultérieurs et Mythos Preview ; transmis entre 0 et 1 aux autres modèles |
+| `tools`, `tool_choice`, `parallel_tool_calls`     | Outils clients, choix automatique/aucun/requis/nommé et parallélisme ; conservation de `strict`                                         |
+| `tool_calls`, messages `tool`                     | Blocs `tool_use` et `tool_result`, avec contrôle des identifiants et des arguments JSON                                                 |
+| `functions`, `function_call`, messages `function` | Ancien format traduit si non ambigu ; appels parallèles désactivés ; réponses au même ancien format                                     |
+| `response_format.type=text`                       | Sortie texte normale                                                                                                                    |
+| `response_format.type=json_schema`                | `output_config.format` ; petits intervalles entiers traduits en `enum` équivalents, autres contraintes conservées                       |
+| `response_format.type=json_object`                | Refusé : fournir un schéma explicite                                                                                                    |
+| `user`                                            | `metadata.user_id` ; utiliser un identifiant opaque                                                                                     |
+| `stream_options.include_usage`                    | Consommation collectée par le service ; le paramètre OpenAI n’est pas envoyé à Anthropic                                                |
+
+Pour les schémas de sortie et d’outils, un champ `type: "integer"` avec des bornes entières inclusives `minimum` et `maximum` est traduit en une liste `enum` lorsque l’intervalle contient au plus 256 valeurs. Ainsi, `score` entre 0 et 100 devient exactement `enum: [0, 1, …, 100]`. Une énumération existante est intersectée avec cet intervalle. Les autres contraintes restent présentes, les données littérales (`const`, exemples, valeurs par défaut) restent intactes, et la requête originale est conservée. Les intervalles plus grands, non entiers ou ouverts ne sont pas réécrits ; les limitations natives Anthropic continuent de s’y appliquer. Aucune contrainte n’est simplement supprimée pour faire accepter un schéma.
 
 Les options supplémentaires à la racine de la requête sont ignorées sur Anthropic : par exemple `enable_thinking`, `seed`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `top_k`, `min_p`, `reasoning_effort`, `chat_template_kwargs` et `extra_body`. Les objets supplémentaires sont ignorés en entier, sans fusion avec la requête native. Le payload original reste conservé pour l’idempotence et transmis aux workers OpenAI. `enable_thinking` n’est pas converti en configuration Anthropic : le raisonnement suit le réglage par défaut du modèle, même si cette option vaut `false`.
 

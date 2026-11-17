@@ -88,7 +88,7 @@ const completion = {
     response_format: {
       type: 'object',
       description:
-        'Options selon le backend. Anthropic accepte text et json_schema (schéma transmis sans modification), mais refuse json_object.',
+        'Options selon le backend. Anthropic accepte text et json_schema ; les intervalles entiers bornés de 256 valeurs maximum sont traduits en enum équivalents. Les autres contraintes sont conservées. json_object reste refusé.',
     },
     stream_options: { type: 'object' },
   },

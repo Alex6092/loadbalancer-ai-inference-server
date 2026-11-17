@@ -56,6 +56,74 @@ function blocks(content, path) {
   });
 }
 
+function acceptsSampling(request, worker) {
+  if ((worker.anthropic_version || '2023-06-01') >= '2026-10-21') return false;
+  if (request.model === 'claude-mythos-preview') return false;
+  const version = /^claude-(?:haiku|sonnet|opus|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?:-|$)/.exec(
+    request.model,
+  );
+  return !version || !(Number(version[1]) > 4 || (Number(version[1]) === 4 && Number(version[2]) >= 7));
+}
+
+// Anthropic rejects numerical bounds, but accepts numeric enum values. Translate
+// small bounded integer domains exactly; never weaken an unsupported constraint.
+function anthropicSchema(schema) {
+  if (!object(schema)) return schema;
+  const result = { ...schema };
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']) {
+    if (object(schema[key]))
+      result[key] = Object.fromEntries(
+        Object.entries(schema[key]).map(([name, child]) => [name, anthropicSchema(child)]),
+      );
+  }
+  for (const key of [
+    'items',
+    'additionalItems',
+    'additionalProperties',
+    'unevaluatedProperties',
+    'unevaluatedItems',
+    'contains',
+    'propertyNames',
+    'not',
+    'if',
+    'then',
+    'else',
+  ]) {
+    if (object(schema[key])) result[key] = anthropicSchema(schema[key]);
+    else if (Array.isArray(schema[key])) result[key] = schema[key].map(anthropicSchema);
+  }
+  for (const key of ['anyOf', 'allOf', 'oneOf', 'prefixItems'])
+    if (Array.isArray(schema[key])) result[key] = schema[key].map(anthropicSchema);
+  if (object(schema.dependencies))
+    result.dependencies = Object.fromEntries(
+      Object.entries(schema.dependencies).map(([name, child]) => [
+        name,
+        object(child) ? anthropicSchema(child) : child,
+      ]),
+    );
+  const { minimum, maximum } = schema;
+  if (
+    schema.type === 'integer' &&
+    Number.isSafeInteger(minimum) &&
+    Number.isSafeInteger(maximum) &&
+    maximum >= minimum &&
+    maximum - minimum < 256 &&
+    (schema.enum === undefined || Array.isArray(schema.enum))
+  ) {
+    const values = Array.from({ length: maximum - minimum + 1 }, (_, index) => minimum + index);
+    const allowed =
+      schema.enum === undefined ? values : values.filter((value) => schema.enum.includes(value));
+    // Leave impossible schemas intact for the backend to reject rather than
+    // replacing them with an invalid empty enum or broadening the accepted set.
+    if (allowed.length) {
+      result.enum = allowed;
+      delete result.minimum;
+      delete result.maximum;
+    }
+  }
+  return result;
+}
+
 function anthropicRequest(request, worker) {
   if (!object(request)) throw unsupported('request', 'objet attendu');
   // Build the native payload explicitly below. Extra top-level options from other
@@ -78,8 +146,7 @@ function anthropicRequest(request, worker) {
   };
   for (const key of ['temperature', 'top_p']) {
     if (request[key] == null) continue;
-    if ((worker.anthropic_version || '2023-06-01') >= '2026-10-21')
-      throw unsupported(key, 'retiré de cette version de l’API Anthropic');
+    if (!acceptsSampling(request, worker)) continue;
     if (typeof request[key] !== 'number' || request[key] < 0 || request[key] > 1)
       throw unsupported(key, 'nombre entre 0 et 1 attendu');
     result[key] = request[key];
@@ -111,7 +178,9 @@ function anthropicRequest(request, worker) {
       return {
         name: text(fn.name, `tools[${i}].name`),
         ...(fn.description == null ? {} : { description: fn.description }),
-        input_schema: fn.parameters ?? { type: 'object', properties: {}, additionalProperties: false },
+        input_schema: anthropicSchema(
+          fn.parameters ?? { type: 'object', properties: {}, additionalProperties: false },
+        ),
         ...(fn.strict == null ? {} : { strict: fn.strict }),
       };
     });
@@ -150,7 +219,9 @@ function anthropicRequest(request, worker) {
     if (format.type === 'json_schema') {
       fields(format.json_schema, ['name', 'description', 'schema', 'strict'], 'response_format.json_schema');
       if (!object(format.json_schema.schema)) throw unsupported('response_format.json_schema.schema');
-      result.output_config = { format: { type: 'json_schema', schema: format.json_schema.schema } };
+      result.output_config = {
+        format: { type: 'json_schema', schema: anthropicSchema(format.json_schema.schema) },
+      };
     } else if (format.type !== 'text')
       throw unsupported('response_format.type', 'utiliser json_schema avec un schéma explicite, ou text');
   }
