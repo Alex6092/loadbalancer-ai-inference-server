@@ -21,6 +21,8 @@ const user = {
 };
 const completion = {
   type: 'object',
+  description:
+    'Requête Chat Completions. Sur les workers Anthropic, les options supplémentaires à la racine propres à d’autres backends (enable_thinking, seed, extra_body, etc.) sont ignorées ; les champs traduits restent validés. Les workers OpenAI reçoivent ces options.',
   required: ['model', 'messages'],
   additionalProperties: true,
   properties: {

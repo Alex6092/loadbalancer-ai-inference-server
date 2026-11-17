@@ -336,13 +336,77 @@ test('Anthropic : ancien format functions, historique et sortie synchrone/stream
   }
 });
 
+test('Anthropic : options propres aux autres backends ignorées en chat et streaming', async (t) => {
+  const f = await fixture(t);
+  const worker = await nativeWorker(t);
+  addNative(f, worker);
+  for (const enable_thinking of [true, false]) {
+    for (const stream of [false, true]) {
+      const request = {
+        ...f.request,
+        stream,
+        enable_thinking,
+        seed: 42,
+        frequency_penalty: 0.2,
+        presence_penalty: 0.1,
+        repetition_penalty: 1.1,
+        top_k: 40,
+        min_p: 0.05,
+        reasoning_effort: 'high',
+        chat_template_kwargs: { enable_thinking },
+        extra_body: { enable_thinking, model: 'other-model', max_tokens: 1000000 },
+      };
+      const original = json(request);
+      const response = await f.inject('/v1/chat/completions', request);
+      assert.equal(response.statusCode, 200, response.body);
+      const job = (await f.inject(`/v1/jobs/${response.headers['x-job-id']}`)).json();
+      assert.equal(job.status, 'succeeded');
+      assert.equal(json(request), original);
+      assert.equal(JSON.parse(f.service.get(job.id).request).enable_thinking, enable_thinking);
+      assert.deepEqual(worker.requests.at(-1).body, {
+        model: 'test-model',
+        max_tokens: 32,
+        stream,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Bonjour' }] }],
+      });
+    }
+  }
+});
+
+test('Options ignorées : jobs idempotents et transmission intégrale aux workers OpenAI', async (t) => {
+  const f = await fixture(t);
+  const native = await nativeWorker(t);
+  const nativeId = addNative(f, native);
+  const request = {
+    ...f.request,
+    enable_thinking: false,
+    seed: 42,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const options = { headers: { ...f.headers, 'idempotency-key': 'ignored-options' } };
+  const submitted = await f.inject('/v1/jobs', request, options);
+  assert.equal(submitted.statusCode, 202, submitted.body);
+  await until(() => f.service.get(submitted.json().id).status === 'succeeded');
+  const replay = await f.inject('/v1/jobs', request, options);
+  assert.equal(replay.statusCode, 200);
+  assert.equal(replay.json().id, submitted.json().id);
+  assert.equal((await f.inject('/v1/jobs', { ...request, enable_thinking: true }, options)).statusCode, 409);
+  assert.equal(native.requests.length, 1);
+  assert.equal(native.requests[0].body.enable_thinking, undefined);
+  f.db.prepare('UPDATE workers SET enabled=0 WHERE id=?').run(nativeId);
+  const openai = await mockWorker(t);
+  addWorker(f, openai);
+  const response = await f.inject('/v1/chat/completions', request);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(openai.requests[0], { ...request, stream: false });
+});
+
 test('Anthropic : paramètres incompatibles rejetés avant job, réservation ou appel', async (t) => {
   const f = await fixture(t);
   const worker = await nativeWorker(t);
   addNative(f, worker);
   const invalid = [
     { response_format: { type: 'json_object' } },
-    { seed: 1 },
     { temperature: 1.5 },
     { tools: [{ type: 'custom' }] },
     { tools, tool_choice: { type: 'function', function: { name: 'missing' } } },
@@ -396,7 +460,9 @@ test('Routage mixte : choisir le protocole compatible, attendre son retour, reva
   assert.equal(openai.calls, 1);
   assert.equal(native.requests.length, 0);
   f.db.prepare("UPDATE workers SET status='unavailable'").run();
-  const changed = (await f.inject('/v1/jobs', { ...f.request, seed: 1 })).json();
+  const changed = (
+    await f.inject('/v1/jobs', { ...f.request, response_format: { type: 'json_object' } })
+  ).json();
   f.db.prepare("UPDATE workers SET provider='anthropic' WHERE id=?").run(openaiId);
   f.scheduler.tick();
   assert.equal(f.service.get(changed.id).status, 'failed');

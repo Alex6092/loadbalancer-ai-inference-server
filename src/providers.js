@@ -57,29 +57,10 @@ function blocks(content, path) {
 }
 
 function anthropicRequest(request, worker) {
-  fields(
-    request,
-    [
-      'model',
-      'messages',
-      'max_tokens',
-      'max_completion_tokens',
-      'stream',
-      'stream_options',
-      'n',
-      'temperature',
-      'top_p',
-      'stop',
-      'tools',
-      'tool_choice',
-      'parallel_tool_calls',
-      'response_format',
-      'functions',
-      'function_call',
-      'user',
-    ],
-    'request',
-  );
+  if (!object(request)) throw unsupported('request', 'objet attendu');
+  // Build the native payload explicitly below. Extra top-level options from other
+  // backends (enable_thinking, seed, extra_body, etc.) are intentionally ignored.
+  // Keep the original request intact for persistence, idempotency and OpenAI routing.
   if (request.n != null && request.n !== 1) throw unsupported('n');
   if (request.stream_options != null) {
     fields(request.stream_options, ['include_usage'], 'stream_options');
